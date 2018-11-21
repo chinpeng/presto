@@ -24,7 +24,6 @@ import com.facebook.presto.spi.type.VarbinaryType;
 import com.facebook.presto.spi.type.VarcharType;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Joiner;
-import com.google.common.base.Throwables;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import io.airlift.json.JsonCodec;
@@ -122,8 +121,8 @@ public class OrcFileWriter
         properties.setProperty(META_TABLE_COLUMNS, Joiner.on(',').join(columnNames));
         properties.setProperty(META_TABLE_COLUMN_TYPES, Joiner.on(':').join(hiveTypeNames));
 
-        serializer = createSerializer(CONFIGURATION, properties);
-        recordWriter = createRecordWriter(new Path(target.toURI()), CONFIGURATION, columnIds, columnTypes, writeMetadata);
+        serializer = createSerializer(properties);
+        recordWriter = createRecordWriter(new Path(target.toURI()), columnIds, columnTypes, writeMetadata);
 
         tableInspector = getStandardStructObjectInspector(columnNames, getJavaObjectInspectors(storageTypes));
         structFields = ImmutableList.copyOf(tableInspector.getAllStructFieldRefs());
@@ -191,19 +190,19 @@ public class OrcFileWriter
         return uncompressedSize;
     }
 
-    private static OrcSerde createSerializer(Configuration conf, Properties properties)
+    private static OrcSerde createSerializer(Properties properties)
     {
         OrcSerde serde = new OrcSerde();
-        serde.initialize(conf, properties);
+        serde.initialize(CONFIGURATION, properties);
         return serde;
     }
 
-    private static RecordWriter createRecordWriter(Path target, Configuration conf, List<Long> columnIds, List<Type> columnTypes, boolean writeMetadata)
+    private static RecordWriter createRecordWriter(Path target, List<Long> columnIds, List<Type> columnTypes, boolean writeMetadata)
     {
         try (ThreadContextClassLoader ignored = new ThreadContextClassLoader(FileSystem.class.getClassLoader());
                 FileSystem fileSystem = new SyncingFileSystem(CONFIGURATION)) {
-            OrcFile.WriterOptions options = new OrcWriterOptions(conf)
-                    .memory(new NullMemoryManager(conf))
+            OrcFile.WriterOptions options = new OrcWriterOptions(CONFIGURATION)
+                    .memory(new NullMemoryManager(CONFIGURATION))
                     .fileSystem(fileSystem)
                     .compress(SNAPPY);
 
@@ -224,12 +223,10 @@ public class OrcFileWriter
         {
             @Override
             public void preStripeWrite(OrcFile.WriterContext context)
-                    throws IOException
             {}
 
             @Override
             public void preFooterWrite(OrcFile.WriterContext context)
-                    throws IOException
             {
                 ImmutableMap.Builder<Long, TypeSignature> columnTypesMap = ImmutableMap.builder();
                 for (int i = 0; i < columnIds.size(); i++) {
@@ -252,7 +249,7 @@ public class OrcFileWriter
             return constructor;
         }
         catch (ReflectiveOperationException e) {
-            throw Throwables.propagate(e);
+            throw new RuntimeException(e);
         }
     }
 

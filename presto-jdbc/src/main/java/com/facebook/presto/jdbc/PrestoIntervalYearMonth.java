@@ -19,10 +19,11 @@ import static com.facebook.presto.client.IntervalYearMonth.formatMonths;
 import static com.facebook.presto.client.IntervalYearMonth.toMonths;
 
 public class PrestoIntervalYearMonth
+        implements Comparable<PrestoIntervalYearMonth>
 {
-    private final long months;
+    private final int months;
 
-    public PrestoIntervalYearMonth(long months)
+    public PrestoIntervalYearMonth(int months)
     {
         this.months = months;
     }
@@ -32,7 +33,7 @@ public class PrestoIntervalYearMonth
         this.months = toMonths(year, months);
     }
 
-    public long getMonths()
+    public int getMonths()
     {
         return months;
     }
@@ -53,7 +54,13 @@ public class PrestoIntervalYearMonth
             return false;
         }
         PrestoIntervalYearMonth other = (PrestoIntervalYearMonth) obj;
-        return Objects.equals(this.months, other.months);
+        return this.months == other.months;
+    }
+
+    @Override
+    public int compareTo(PrestoIntervalYearMonth o)
+    {
+        return Integer.compare(months, o.months);
     }
 
     @Override

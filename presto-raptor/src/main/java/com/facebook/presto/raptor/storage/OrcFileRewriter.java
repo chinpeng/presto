@@ -16,17 +16,19 @@ package com.facebook.presto.raptor.storage;
 import com.facebook.presto.raptor.util.Closer;
 import com.facebook.presto.raptor.util.SyncingFileSystem;
 import com.facebook.presto.spi.classloader.ThreadContextClassLoader;
-import com.google.common.primitives.Ints;
 import io.airlift.log.Logger;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.hive.ql.io.orc.NullMemoryManager;
 import org.apache.hadoop.hive.ql.io.orc.OrcFile.WriterOptions;
 import org.apache.hadoop.hive.ql.io.orc.OrcStruct;
+import org.apache.hadoop.hive.ql.io.orc.OrcWriterOptions;
 import org.apache.hadoop.hive.ql.io.orc.Reader;
 import org.apache.hadoop.hive.ql.io.orc.RecordReader;
 import org.apache.hadoop.hive.ql.io.orc.Writer;
 import org.apache.hadoop.hive.serde2.io.DoubleWritable;
+import org.apache.hadoop.hive.serde2.io.HiveDecimalWritable;
 import org.apache.hadoop.io.BooleanWritable;
 import org.apache.hadoop.io.BytesWritable;
 import org.apache.hadoop.io.LongWritable;
@@ -45,9 +47,9 @@ import static io.airlift.slice.SizeOf.SIZE_OF_BYTE;
 import static io.airlift.slice.SizeOf.SIZE_OF_DOUBLE;
 import static io.airlift.slice.SizeOf.SIZE_OF_LONG;
 import static io.airlift.units.Duration.nanosSince;
+import static java.lang.Math.toIntExact;
 import static org.apache.hadoop.hive.ql.io.orc.OrcFile.createReader;
 import static org.apache.hadoop.hive.ql.io.orc.OrcFile.createWriter;
-import static org.apache.hadoop.hive.ql.io.orc.OrcFile.writerOptions;
 import static org.apache.hadoop.hive.ql.io.orc.OrcUtil.getFieldValue;
 
 public final class OrcFileRewriter
@@ -74,9 +76,10 @@ public final class OrcFileRewriter
             if (reader.getNumberOfRows() >= Integer.MAX_VALUE) {
                 throw new IOException("File has too many rows");
             }
-            int inputRowCount = Ints.checkedCast(reader.getNumberOfRows());
+            int inputRowCount = toIntExact(reader.getNumberOfRows());
 
-            WriterOptions writerOptions = writerOptions(CONFIGURATION)
+            WriterOptions writerOptions = new OrcWriterOptions(CONFIGURATION)
+                    .memory(new NullMemoryManager(CONFIGURATION))
                     .fileSystem(fileSystem)
                     .compress(reader.getCompression())
                     .inspector(reader.getObjectInspector());
@@ -153,6 +156,9 @@ public final class OrcFileRewriter
         }
         if (object instanceof DoubleWritable) {
             return SIZE_OF_DOUBLE;
+        }
+        if (object instanceof HiveDecimalWritable) {
+            return SIZE_OF_LONG;
         }
         if (object instanceof Text) {
             return ((Text) object).getLength();

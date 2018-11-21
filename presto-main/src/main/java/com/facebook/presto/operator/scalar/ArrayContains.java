@@ -18,19 +18,18 @@ import com.facebook.presto.spi.block.Block;
 import com.facebook.presto.spi.function.Description;
 import com.facebook.presto.spi.function.OperatorDependency;
 import com.facebook.presto.spi.function.ScalarFunction;
+import com.facebook.presto.spi.function.SqlNullable;
 import com.facebook.presto.spi.function.SqlType;
 import com.facebook.presto.spi.function.TypeParameter;
 import com.facebook.presto.spi.type.StandardTypes;
 import com.facebook.presto.spi.type.Type;
-import com.google.common.base.Throwables;
 import io.airlift.slice.Slice;
-
-import javax.annotation.Nullable;
 
 import java.lang.invoke.MethodHandle;
 
-import static com.facebook.presto.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
+import static com.facebook.presto.spi.StandardErrorCode.NOT_SUPPORTED;
 import static com.facebook.presto.spi.function.OperatorType.EQUAL;
+import static com.facebook.presto.util.Failures.internalError;
 
 @Description("Determines whether given value exists in the array")
 @ScalarFunction("contains")
@@ -38,20 +37,14 @@ public final class ArrayContains
 {
     private ArrayContains() {}
 
-    @SqlType(StandardTypes.BOOLEAN)
-    @Nullable
-    public static Boolean arrayWithUnknownType(@SqlType("array(unknown)") Block arrayBlock, @Nullable @SqlType("unknown") Void value)
-    {
-        return null;
-    }
-
     @TypeParameter("T")
     @SqlType(StandardTypes.BOOLEAN)
-    @Nullable
-    public static Boolean contains(@TypeParameter("T") Type elementType,
-                                   @OperatorDependency(operator = EQUAL, returnType = StandardTypes.BOOLEAN, argumentTypes = {"T", "T"}) MethodHandle equals,
-                                   @SqlType("array(T)") Block arrayBlock,
-                                   @SqlType("T") Block value)
+    @SqlNullable
+    public static Boolean contains(
+            @TypeParameter("T") Type elementType,
+            @OperatorDependency(operator = EQUAL, returnType = StandardTypes.BOOLEAN, argumentTypes = {"T", "T"}) MethodHandle equals,
+            @SqlType("array(T)") Block arrayBlock,
+            @SqlType("T") Block value)
     {
         boolean foundNull = false;
         for (int i = 0; i < arrayBlock.getPositionCount(); i++) {
@@ -60,15 +53,14 @@ public final class ArrayContains
                 continue;
             }
             try {
-                if ((boolean) equals.invokeExact((Block) elementType.getObject(arrayBlock, i), value)) {
+                Boolean result = (Boolean) equals.invokeExact((Block) elementType.getObject(arrayBlock, i), value);
+                checkNotIndeterminate(result);
+                if (result) {
                     return true;
                 }
             }
             catch (Throwable t) {
-                Throwables.propagateIfInstanceOf(t, Error.class);
-                Throwables.propagateIfInstanceOf(t, PrestoException.class);
-
-                throw new PrestoException(GENERIC_INTERNAL_ERROR, t);
+                throw internalError(t);
             }
         }
         if (foundNull) {
@@ -79,11 +71,12 @@ public final class ArrayContains
 
     @TypeParameter("T")
     @SqlType(StandardTypes.BOOLEAN)
-    @Nullable
-    public static Boolean contains(@TypeParameter("T") Type elementType,
-                                   @OperatorDependency(operator = EQUAL, returnType = StandardTypes.BOOLEAN, argumentTypes = {"T", "T"}) MethodHandle equals,
-                                   @SqlType("array(T)") Block arrayBlock,
-                                   @SqlType("T") Slice value)
+    @SqlNullable
+    public static Boolean contains(
+            @TypeParameter("T") Type elementType,
+            @OperatorDependency(operator = EQUAL, returnType = StandardTypes.BOOLEAN, argumentTypes = {"T", "T"}) MethodHandle equals,
+            @SqlType("array(T)") Block arrayBlock,
+            @SqlType("T") Slice value)
     {
         boolean foundNull = false;
         for (int i = 0; i < arrayBlock.getPositionCount(); i++) {
@@ -92,15 +85,14 @@ public final class ArrayContains
                 continue;
             }
             try {
-                if ((boolean) equals.invokeExact(elementType.getSlice(arrayBlock, i), value)) {
+                Boolean result = (Boolean) equals.invokeExact(elementType.getSlice(arrayBlock, i), value);
+                checkNotIndeterminate(result);
+                if (result) {
                     return true;
                 }
             }
             catch (Throwable t) {
-                Throwables.propagateIfInstanceOf(t, Error.class);
-                Throwables.propagateIfInstanceOf(t, PrestoException.class);
-
-                throw new PrestoException(GENERIC_INTERNAL_ERROR, t);
+                throw internalError(t);
             }
         }
         if (foundNull) {
@@ -111,11 +103,12 @@ public final class ArrayContains
 
     @TypeParameter("T")
     @SqlType(StandardTypes.BOOLEAN)
-    @Nullable
-    public static Boolean contains(@TypeParameter("T") Type elementType,
-                                   @OperatorDependency(operator = EQUAL, returnType = StandardTypes.BOOLEAN, argumentTypes = {"T", "T"}) MethodHandle equals,
-                                   @SqlType("array(T)") Block arrayBlock,
-                                   @SqlType("T") long value)
+    @SqlNullable
+    public static Boolean contains(
+            @TypeParameter("T") Type elementType,
+            @OperatorDependency(operator = EQUAL, returnType = StandardTypes.BOOLEAN, argumentTypes = {"T", "T"}) MethodHandle equals,
+            @SqlType("array(T)") Block arrayBlock,
+            @SqlType("T") long value)
     {
         boolean foundNull = false;
         for (int i = 0; i < arrayBlock.getPositionCount(); i++) {
@@ -124,15 +117,14 @@ public final class ArrayContains
                 continue;
             }
             try {
-                if ((boolean) equals.invokeExact(elementType.getLong(arrayBlock, i), value)) {
+                Boolean result = (Boolean) equals.invokeExact(elementType.getLong(arrayBlock, i), value);
+                checkNotIndeterminate(result);
+                if (result) {
                     return true;
                 }
             }
             catch (Throwable t) {
-                Throwables.propagateIfInstanceOf(t, Error.class);
-                Throwables.propagateIfInstanceOf(t, PrestoException.class);
-
-                throw new PrestoException(GENERIC_INTERNAL_ERROR, t);
+                throw internalError(t);
             }
         }
         if (foundNull) {
@@ -143,11 +135,12 @@ public final class ArrayContains
 
     @TypeParameter("T")
     @SqlType(StandardTypes.BOOLEAN)
-    @Nullable
-    public static Boolean contains(@TypeParameter("T") Type elementType,
-                                   @OperatorDependency(operator = EQUAL, returnType = StandardTypes.BOOLEAN, argumentTypes = {"T", "T"}) MethodHandle equals,
-                                   @SqlType("array(T)") Block arrayBlock,
-                                   @SqlType("T") boolean value)
+    @SqlNullable
+    public static Boolean contains(
+            @TypeParameter("T") Type elementType,
+            @OperatorDependency(operator = EQUAL, returnType = StandardTypes.BOOLEAN, argumentTypes = {"T", "T"}) MethodHandle equals,
+            @SqlType("array(T)") Block arrayBlock,
+            @SqlType("T") boolean value)
     {
         boolean foundNull = false;
         for (int i = 0; i < arrayBlock.getPositionCount(); i++) {
@@ -156,15 +149,14 @@ public final class ArrayContains
                 continue;
             }
             try {
-                if ((boolean) equals.invokeExact(elementType.getBoolean(arrayBlock, i), value)) {
+                Boolean result = (Boolean) equals.invokeExact(elementType.getBoolean(arrayBlock, i), value);
+                checkNotIndeterminate(result);
+                if (result) {
                     return true;
                 }
             }
             catch (Throwable t) {
-                Throwables.propagateIfInstanceOf(t, Error.class);
-                Throwables.propagateIfInstanceOf(t, PrestoException.class);
-
-                throw new PrestoException(GENERIC_INTERNAL_ERROR, t);
+                throw internalError(t);
             }
         }
         if (foundNull) {
@@ -175,11 +167,12 @@ public final class ArrayContains
 
     @TypeParameter("T")
     @SqlType(StandardTypes.BOOLEAN)
-    @Nullable
-    public static Boolean contains(@TypeParameter("T") Type elementType,
-                                   @OperatorDependency(operator = EQUAL, returnType = StandardTypes.BOOLEAN, argumentTypes = {"T", "T"}) MethodHandle equals,
-                                   @SqlType("array(T)") Block arrayBlock,
-                                   @SqlType("T") double value)
+    @SqlNullable
+    public static Boolean contains(
+            @TypeParameter("T") Type elementType,
+            @OperatorDependency(operator = EQUAL, returnType = StandardTypes.BOOLEAN, argumentTypes = {"T", "T"}) MethodHandle equals,
+            @SqlType("array(T)") Block arrayBlock,
+            @SqlType("T") double value)
     {
         boolean foundNull = false;
         for (int i = 0; i < arrayBlock.getPositionCount(); i++) {
@@ -188,20 +181,26 @@ public final class ArrayContains
                 continue;
             }
             try {
-                if ((boolean) equals.invokeExact(elementType.getDouble(arrayBlock, i), value)) {
+                Boolean result = (Boolean) equals.invokeExact(elementType.getDouble(arrayBlock, i), value);
+                checkNotIndeterminate(result);
+                if (result) {
                     return true;
                 }
             }
             catch (Throwable t) {
-                Throwables.propagateIfInstanceOf(t, Error.class);
-                Throwables.propagateIfInstanceOf(t, PrestoException.class);
-
-                throw new PrestoException(GENERIC_INTERNAL_ERROR, t);
+                throw internalError(t);
             }
         }
         if (foundNull) {
             return null;
         }
         return false;
+    }
+
+    private static void checkNotIndeterminate(Boolean equalsResult)
+    {
+        if (equalsResult == null) {
+            throw new PrestoException(NOT_SUPPORTED, "contains does not support arrays with elements that are null or contain null");
+        }
     }
 }

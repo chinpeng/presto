@@ -16,25 +16,28 @@ package com.facebook.presto.execution;
 
 import com.facebook.presto.Session;
 import com.facebook.presto.Session.SessionBuilder;
+import com.facebook.presto.execution.warnings.WarningCollector;
 import com.facebook.presto.metadata.MetadataManager;
 import com.facebook.presto.security.AllowAllAccessControl;
 import com.facebook.presto.spi.PrestoException;
+import com.facebook.presto.spi.resourceGroups.ResourceGroupId;
 import com.facebook.presto.sql.tree.Rollback;
 import com.facebook.presto.transaction.TransactionId;
 import com.facebook.presto.transaction.TransactionManager;
-import com.google.common.base.Throwables;
 import org.testng.annotations.AfterClass;
 import org.testng.annotations.Test;
 
 import java.net.URI;
-import java.util.concurrent.CompletionException;
+import java.util.Optional;
 import java.util.concurrent.ExecutorService;
 
 import static com.facebook.presto.spi.StandardErrorCode.NOT_IN_TRANSACTION;
 import static com.facebook.presto.testing.TestingSession.testSessionBuilder;
 import static com.facebook.presto.tpch.TpchMetadata.TINY_SCHEMA_NAME;
-import static com.facebook.presto.transaction.TransactionManager.createTestTransactionManager;
+import static com.facebook.presto.transaction.InMemoryTransactionManager.createTestTransactionManager;
+import static io.airlift.concurrent.MoreFutures.getFutureValue;
 import static io.airlift.concurrent.Threads.daemonThreadsNamed;
+import static java.util.Collections.emptyList;
 import static java.util.concurrent.Executors.newCachedThreadPool;
 import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertFalse;
@@ -48,75 +51,81 @@ public class TestRollbackTask
 
     @AfterClass(alwaysRun = true)
     public void tearDown()
-            throws Exception
     {
         executor.shutdownNow();
     }
 
     @Test
     public void testRollback()
-            throws Exception
     {
         TransactionManager transactionManager = createTestTransactionManager();
 
         Session session = sessionBuilder()
                 .setTransactionId(transactionManager.beginTransaction(false))
                 .build();
-        QueryStateMachine stateMachine = QueryStateMachine.begin(new QueryId("query"), "ROLLBACK", session, URI.create("fake://uri"), true, transactionManager, executor);
+        QueryStateMachine stateMachine = createQueryStateMachine("ROLLBACK", session, transactionManager);
         assertTrue(stateMachine.getSession().getTransactionId().isPresent());
         assertEquals(transactionManager.getAllTransactionInfos().size(), 1);
 
-        new RollbackTask().execute(new Rollback(), transactionManager, metadata, new AllowAllAccessControl(), stateMachine).join();
-        assertTrue(stateMachine.getQueryInfoWithoutDetails().isClearTransactionId());
-        assertFalse(stateMachine.getQueryInfoWithoutDetails().getStartedTransactionId().isPresent());
+        getFutureValue(new RollbackTask().execute(new Rollback(), transactionManager, metadata, new AllowAllAccessControl(), stateMachine, emptyList()));
+        assertTrue(stateMachine.getQueryInfo(Optional.empty()).isClearTransactionId());
+        assertFalse(stateMachine.getQueryInfo(Optional.empty()).getStartedTransactionId().isPresent());
 
         assertTrue(transactionManager.getAllTransactionInfos().isEmpty());
     }
 
     @Test
     public void testNoTransactionRollback()
-            throws Exception
     {
         TransactionManager transactionManager = createTestTransactionManager();
 
         Session session = sessionBuilder()
                 .build();
-        QueryStateMachine stateMachine = QueryStateMachine.begin(new QueryId("query"), "ROLLBACK", session, URI.create("fake://uri"), true, transactionManager, executor);
+        QueryStateMachine stateMachine = createQueryStateMachine("ROLLBACK", session, transactionManager);
 
         try {
-            try {
-                new RollbackTask().execute(new Rollback(), transactionManager, metadata, new AllowAllAccessControl(), stateMachine).join();
-                fail();
-            }
-            catch (CompletionException e) {
-                throw Throwables.propagate(e.getCause());
-            }
+            getFutureValue(new RollbackTask().execute(new Rollback(), transactionManager, metadata, new AllowAllAccessControl(), stateMachine, emptyList()));
+            fail();
         }
         catch (PrestoException e) {
             assertEquals(e.getErrorCode(), NOT_IN_TRANSACTION.toErrorCode());
         }
-        assertFalse(stateMachine.getQueryInfoWithoutDetails().isClearTransactionId());
-        assertFalse(stateMachine.getQueryInfoWithoutDetails().getStartedTransactionId().isPresent());
+        assertFalse(stateMachine.getQueryInfo(Optional.empty()).isClearTransactionId());
+        assertFalse(stateMachine.getQueryInfo(Optional.empty()).getStartedTransactionId().isPresent());
 
         assertTrue(transactionManager.getAllTransactionInfos().isEmpty());
     }
 
     @Test
     public void testUnknownTransactionRollback()
-            throws Exception
     {
         TransactionManager transactionManager = createTestTransactionManager();
 
         Session session = sessionBuilder()
                 .setTransactionId(TransactionId.create()) // Use a random transaction ID that is unknown to the system
                 .build();
-        QueryStateMachine stateMachine = QueryStateMachine.begin(new QueryId("query"), "ROLLBACK", session, URI.create("fake://uri"), true, transactionManager, executor);
+        QueryStateMachine stateMachine = createQueryStateMachine("ROLLBACK", session, transactionManager);
 
-        new RollbackTask().execute(new Rollback(), transactionManager, metadata, new AllowAllAccessControl(), stateMachine).join();
-        assertTrue(stateMachine.getQueryInfoWithoutDetails().isClearTransactionId()); // Still issue clear signal
-        assertFalse(stateMachine.getQueryInfoWithoutDetails().getStartedTransactionId().isPresent());
+        getFutureValue(new RollbackTask().execute(new Rollback(), transactionManager, metadata, new AllowAllAccessControl(), stateMachine, emptyList()));
+        assertTrue(stateMachine.getQueryInfo(Optional.empty()).isClearTransactionId()); // Still issue clear signal
+        assertFalse(stateMachine.getQueryInfo(Optional.empty()).getStartedTransactionId().isPresent());
 
         assertTrue(transactionManager.getAllTransactionInfos().isEmpty());
+    }
+
+    private QueryStateMachine createQueryStateMachine(String query, Session session, TransactionManager transactionManager)
+    {
+        return QueryStateMachine.begin(
+                query,
+                session,
+                URI.create("fake://uri"),
+                new ResourceGroupId("test"),
+                true,
+                transactionManager,
+                new AllowAllAccessControl(),
+                executor,
+                metadata,
+                WarningCollector.NOOP);
     }
 
     private static SessionBuilder sessionBuilder()

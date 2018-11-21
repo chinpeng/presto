@@ -14,9 +14,12 @@
 package com.facebook.presto.execution;
 
 import com.facebook.presto.Session;
+import com.facebook.presto.execution.warnings.WarningCollector;
 import com.facebook.presto.metadata.MetadataManager;
+import com.facebook.presto.security.AccessControlManager;
 import com.facebook.presto.security.AllowAllAccessControl;
 import com.facebook.presto.spi.PrestoException;
+import com.facebook.presto.spi.resourceGroups.ResourceGroupId;
 import com.facebook.presto.sql.parser.SqlParser;
 import com.facebook.presto.sql.tree.AllColumns;
 import com.facebook.presto.sql.tree.Execute;
@@ -36,11 +39,14 @@ import java.util.concurrent.ExecutorService;
 import static com.facebook.presto.SessionTestUtils.TEST_SESSION;
 import static com.facebook.presto.metadata.MetadataManager.createTestMetadataManager;
 import static com.facebook.presto.spi.StandardErrorCode.NOT_SUPPORTED;
+import static com.facebook.presto.sql.QueryUtil.identifier;
 import static com.facebook.presto.sql.QueryUtil.selectList;
 import static com.facebook.presto.sql.QueryUtil.simpleQuery;
 import static com.facebook.presto.sql.QueryUtil.table;
-import static com.facebook.presto.transaction.TransactionManager.createTestTransactionManager;
+import static com.facebook.presto.testing.TestingSession.testSessionBuilder;
+import static com.facebook.presto.transaction.InMemoryTransactionManager.createTestTransactionManager;
 import static io.airlift.concurrent.Threads.daemonThreadsNamed;
+import static java.util.Collections.emptyList;
 import static java.util.concurrent.Executors.newCachedThreadPool;
 import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.fail;
@@ -52,7 +58,6 @@ public class TestPrepareTask
 
     @AfterClass(alwaysRun = true)
     public void tearDown()
-            throws Exception
     {
         executor.shutdownNow();
     }
@@ -69,7 +74,9 @@ public class TestPrepareTask
     @Test
     public void testPrepareNameExists()
     {
-        Session session = TEST_SESSION.withPreparedStatement("my_query", "SELECT bar, baz from foo");
+        Session session = testSessionBuilder()
+                .addPreparedStatement("my_query", "SELECT bar, baz from foo")
+                .build();
 
         Query query = simpleQuery(selectList(new AllColumns()), table(QualifiedName.of("foo")));
         String sqlString = "PREPARE my_query FROM SELECT * FROM foo";
@@ -80,7 +87,7 @@ public class TestPrepareTask
     @Test
     public void testPrepareInvalidStatement()
     {
-        Statement statement = new Execute("foo");
+        Statement statement = new Execute(identifier("foo"), emptyList());
         String sqlString = "PREPARE my_query FROM EXECUTE foo";
         try {
             executePrepare("my_query", statement, sqlString, TEST_SESSION);
@@ -95,9 +102,19 @@ public class TestPrepareTask
     private Map<String, String> executePrepare(String statementName, Statement statement, String sqlString, Session session)
     {
         TransactionManager transactionManager = createTestTransactionManager();
-        QueryStateMachine stateMachine = QueryStateMachine.begin(new QueryId("query"), sqlString, session, URI.create("fake://uri"), false, transactionManager, executor);
-        Prepare prepare = new Prepare(statementName, statement);
-        new PrepareTask(new SqlParser()).execute(prepare, transactionManager, metadata, new AllowAllAccessControl(), stateMachine);
+        QueryStateMachine stateMachine = QueryStateMachine.begin(
+                sqlString,
+                session,
+                URI.create("fake://uri"),
+                new ResourceGroupId("test"),
+                false,
+                transactionManager,
+                new AccessControlManager(transactionManager),
+                executor,
+                metadata,
+                WarningCollector.NOOP);
+        Prepare prepare = new Prepare(identifier(statementName), statement);
+        new PrepareTask(new SqlParser()).execute(prepare, transactionManager, metadata, new AllowAllAccessControl(), stateMachine, emptyList());
         return stateMachine.getAddedPreparedStatements();
     }
 }

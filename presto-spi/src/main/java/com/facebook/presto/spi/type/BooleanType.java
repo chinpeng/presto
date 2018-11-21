@@ -18,6 +18,7 @@ import com.facebook.presto.spi.block.Block;
 import com.facebook.presto.spi.block.BlockBuilder;
 import com.facebook.presto.spi.block.BlockBuilderStatus;
 import com.facebook.presto.spi.block.ByteArrayBlockBuilder;
+import com.facebook.presto.spi.block.PageBuilderStatus;
 
 import static com.facebook.presto.spi.type.TypeSignature.parseTypeSignature;
 
@@ -41,9 +42,16 @@ public final class BooleanType
     @Override
     public BlockBuilder createBlockBuilder(BlockBuilderStatus blockBuilderStatus, int expectedEntries, int expectedBytesPerEntry)
     {
+        int maxBlockSizeInBytes;
+        if (blockBuilderStatus == null) {
+            maxBlockSizeInBytes = PageBuilderStatus.DEFAULT_MAX_PAGE_SIZE_IN_BYTES;
+        }
+        else {
+            maxBlockSizeInBytes = blockBuilderStatus.getMaxPageSizeInBytes();
+        }
         return new ByteArrayBlockBuilder(
                 blockBuilderStatus,
-                Math.min(expectedEntries, blockBuilderStatus.getMaxBlockSizeInBytes() / Byte.BYTES));
+                Math.min(expectedEntries, maxBlockSizeInBytes / Byte.BYTES));
     }
 
     @Override
@@ -55,7 +63,7 @@ public final class BooleanType
     @Override
     public BlockBuilder createFixedSizeBlockBuilder(int positionCount)
     {
-        return new ByteArrayBlockBuilder(new BlockBuilderStatus(), positionCount);
+        return new ByteArrayBlockBuilder(null, positionCount);
     }
 
     @Override

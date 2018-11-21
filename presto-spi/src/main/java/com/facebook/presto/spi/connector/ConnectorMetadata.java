@@ -30,8 +30,13 @@ import com.facebook.presto.spi.Constraint;
 import com.facebook.presto.spi.PrestoException;
 import com.facebook.presto.spi.SchemaTableName;
 import com.facebook.presto.spi.SchemaTablePrefix;
+import com.facebook.presto.spi.SystemTable;
 import com.facebook.presto.spi.predicate.TupleDomain;
+import com.facebook.presto.spi.security.GrantInfo;
 import com.facebook.presto.spi.security.Privilege;
+import com.facebook.presto.spi.statistics.ComputedStatistics;
+import com.facebook.presto.spi.statistics.TableStatistics;
+import com.facebook.presto.spi.statistics.TableStatisticsMetadata;
 import io.airlift.slice.Slice;
 
 import java.util.Collection;
@@ -51,6 +56,15 @@ import static java.util.stream.Collectors.toList;
 public interface ConnectorMetadata
 {
     /**
+     * Checks if a schema exists. The connector may have schemas that exist
+     * but are not enumerable via {@link #listSchemaNames}.
+     */
+    default boolean schemaExists(ConnectorSession session, String schemaName)
+    {
+        return listSchemaNames(session).contains(schemaName);
+    }
+
+    /**
      * Returns the schemas provided by this connector.
      */
     List<String> listSchemaNames(ConnectorSession session);
@@ -59,6 +73,17 @@ public interface ConnectorMetadata
      * Returns a table handle for the specified table name, or null if the connector does not contain the table.
      */
     ConnectorTableHandle getTableHandle(ConnectorSession session, SchemaTableName tableName);
+
+    /**
+     * Returns the system table for the specified table name, if one exists.
+     * The system tables handled via {@link #getSystemTable} differ form those returned by {@link Connector#getSystemTables()}.
+     * The former mechanism allows dynamic resolution of system tables, while the latter is
+     * based on static list of system tables built during startup.
+     */
+    default Optional<SystemTable> getSystemTable(ConnectorSession session, SchemaTableName tableName)
+    {
+        return Optional.empty();
+    }
 
     /**
      * Return a list of table layouts that satisfy the given constraint.
@@ -74,6 +99,29 @@ public interface ConnectorMetadata
     ConnectorTableLayout getTableLayout(ConnectorSession session, ConnectorTableLayoutHandle handle);
 
     /**
+     * Return a table layout handle whose partitioning is converted to the provided partitioning handle,
+     * but otherwise identical to the provided table layout handle.
+     * The provided table layout handle must be one that the connector can transparently convert to from
+     * the original partitioning handle associated with the provided table layout handle,
+     * as promised by {@link #getCommonPartitioningHandle}.
+     */
+    default ConnectorTableLayoutHandle getAlternativeLayoutHandle(ConnectorSession session, ConnectorTableLayoutHandle tableLayoutHandle, ConnectorPartitioningHandle partitioningHandle)
+    {
+        throw new PrestoException(GENERIC_INTERNAL_ERROR, "ConnectorMetadata getCommonPartitioningHandle() is implemented without getAlternativeLayout()");
+    }
+
+    /**
+     * Return a partitioning handle which the connector can transparently convert both {@code left} and {@code right} into.
+     */
+    default Optional<ConnectorPartitioningHandle> getCommonPartitioningHandle(ConnectorSession session, ConnectorPartitioningHandle left, ConnectorPartitioningHandle right)
+    {
+        if (left.equals(right)) {
+            return Optional.of(left);
+        }
+        return Optional.empty();
+    }
+
+    /**
      * Return the metadata for the specified table handle.
      *
      * @throws RuntimeException if table handle is no longer valid
@@ -81,26 +129,32 @@ public interface ConnectorMetadata
     ConnectorTableMetadata getTableMetadata(ConnectorSession session, ConnectorTableHandle table);
 
     /**
-     * List table names, possibly filtered by schema. An empty list is returned if none match.
-     */
-    List<SchemaTableName> listTables(ConnectorSession session, String schemaNameOrNull);
-
-    /**
-     * Returns the handle for the sample weight column, or null if the table does not contain sampled data.
+     * Return the connector-specific metadata for the specified table layout. This is the object that is passed to the event listener framework.
      *
-     * @throws RuntimeException if the table handle is no longer valid
+     * @throws RuntimeException if table handle is no longer valid
      */
-    default ColumnHandle getSampleWeightColumnHandle(ConnectorSession session, ConnectorTableHandle tableHandle)
+    default Optional<Object> getInfo(ConnectorTableLayoutHandle layoutHandle)
     {
-        return null;
+        return Optional.empty();
     }
 
     /**
-     * Returns true if this catalog supports creation of sampled tables
+     * List table names, possibly filtered by schema. An empty list is returned if none match.
+     *
+     * @deprecated replaced by {@link ConnectorMetadata#listTables(ConnectorSession, Optional)}
      */
-    default boolean canCreateSampledTables(ConnectorSession session)
+    @Deprecated
+    default List<SchemaTableName> listTables(ConnectorSession session, String schemaNameOrNull)
     {
-        return false;
+        return emptyList();
+    }
+
+    /**
+     * List table names, possibly filtered by schema. An empty list is returned if none match.
+     */
+    default List<SchemaTableName> listTables(ConnectorSession session, Optional<String> schemaName)
+    {
+        return listTables(session, schemaName.orElse(null));
     }
 
     /**
@@ -123,9 +177,45 @@ public interface ConnectorMetadata
     Map<SchemaTableName, List<ColumnMetadata>> listTableColumns(ConnectorSession session, SchemaTablePrefix prefix);
 
     /**
-     * Creates a table using the specified table metadata.
+     * Get statistics for table for given filtering constraint.
      */
-    default void createTable(ConnectorSession session, ConnectorTableMetadata tableMetadata)
+    default TableStatistics getTableStatistics(ConnectorSession session, ConnectorTableHandle tableHandle, Constraint<ColumnHandle> constraint)
+    {
+        return TableStatistics.empty();
+    }
+
+    /**
+     * Creates a schema.
+     */
+    default void createSchema(ConnectorSession session, String schemaName, Map<String, Object> properties)
+    {
+        throw new PrestoException(NOT_SUPPORTED, "This connector does not support creating schemas");
+    }
+
+    /**
+     * Drops the specified schema.
+     *
+     * @throws PrestoException with {@code SCHEMA_NOT_EMPTY} if the schema is not empty
+     */
+    default void dropSchema(ConnectorSession session, String schemaName)
+    {
+        throw new PrestoException(NOT_SUPPORTED, "This connector does not support dropping schemas");
+    }
+
+    /**
+     * Renames the specified schema.
+     */
+    default void renameSchema(ConnectorSession session, String source, String target)
+    {
+        throw new PrestoException(NOT_SUPPORTED, "This connector does not support renaming schemas");
+    }
+
+    /**
+     * Creates a table using the specified table metadata.
+     *
+     * @throws PrestoException with {@code ALREADY_EXISTS} if the table already exists and {@param ignoreExisting} is not set
+     */
+    default void createTable(ConnectorSession session, ConnectorTableMetadata tableMetadata, boolean ignoreExisting)
     {
         throw new PrestoException(NOT_SUPPORTED, "This connector does not support creating tables");
     }
@@ -165,6 +255,14 @@ public interface ConnectorMetadata
     }
 
     /**
+     * Drop the specified column
+     */
+    default void dropColumn(ConnectorSession session, ConnectorTableHandle tableHandle, ColumnHandle column)
+    {
+        throw new PrestoException(NOT_SUPPORTED, "This connector does not support dropping columns");
+    }
+
+    /**
      * Get the physical layout for a new table.
      */
     default Optional<ConnectorNewTableLayout> getNewTableLayout(ConnectorSession session, ConnectorTableMetadata tableMetadata)
@@ -180,7 +278,7 @@ public interface ConnectorMetadata
         List<ConnectorTableLayout> layouts = getTableLayouts(session, tableHandle, new Constraint<>(TupleDomain.all(), map -> true), Optional.empty())
                 .stream()
                 .map(ConnectorTableLayoutResult::getTableLayout)
-                .filter(layout -> layout.getNodePartitioning().isPresent())
+                .filter(layout -> layout.getTablePartitioning().isPresent())
                 .collect(toList());
 
         if (layouts.isEmpty()) {
@@ -192,14 +290,22 @@ public interface ConnectorMetadata
         }
 
         ConnectorTableLayout layout = layouts.get(0);
-        ConnectorPartitioningHandle partitioningHandle = layout.getNodePartitioning().get().getPartitioningHandle();
+        ConnectorPartitioningHandle partitioningHandle = layout.getTablePartitioning().get().getPartitioningHandle();
         Map<ColumnHandle, String> columnNamesByHandle = getColumnHandles(session, tableHandle).entrySet().stream()
                 .collect(Collectors.toMap(Map.Entry::getValue, Map.Entry::getKey));
-        List<String> partitionColumns = layout.getNodePartitioning().get().getPartitioningColumns().stream()
+        List<String> partitionColumns = layout.getTablePartitioning().get().getPartitioningColumns().stream()
                 .map(columnNamesByHandle::get)
                 .collect(toList());
 
         return Optional.of(new ConnectorNewTableLayout(partitioningHandle, partitionColumns));
+    }
+
+    /**
+     * Describes statistics that must be collected during a write.
+     */
+    default TableStatisticsMetadata getStatisticsCollectionMetadata(ConnectorSession session, ConnectorTableMetadata tableMetadata)
+    {
+        return TableStatisticsMetadata.empty();
     }
 
     /**
@@ -213,10 +319,21 @@ public interface ConnectorMetadata
     /**
      * Finish a table creation with data after the data is written.
      */
-    default void finishCreateTable(ConnectorSession session, ConnectorOutputTableHandle tableHandle, Collection<Slice> fragments)
+    default Optional<ConnectorOutputMetadata> finishCreateTable(ConnectorSession session, ConnectorOutputTableHandle tableHandle, Collection<Slice> fragments, Collection<ComputedStatistics> computedStatistics)
     {
         throw new PrestoException(GENERIC_INTERNAL_ERROR, "ConnectorMetadata beginCreateTable() is implemented without finishCreateTable()");
     }
+
+    /**
+     * Start a SELECT/UPDATE/INSERT/DELETE query. This notification is triggered after the planning phase completes.
+     */
+    default void beginQuery(ConnectorSession session) {}
+
+    /**
+     * Cleanup after a SELECT/UPDATE/INSERT/DELETE query. This is the very last notification after the query finishes, whether it succeeds or fails.
+     * An exception thrown in this method will not affect the result of the query.
+     */
+    default void cleanupQuery(ConnectorSession session) {}
 
     /**
      * Begin insert query
@@ -229,7 +346,7 @@ public interface ConnectorMetadata
     /**
      * Finish insert query
      */
-    default void finishInsert(ConnectorSession session, ConnectorInsertTableHandle insertHandle, Collection<Slice> fragments)
+    default Optional<ConnectorOutputMetadata> finishInsert(ConnectorSession session, ConnectorInsertTableHandle insertHandle, Collection<Slice> fragments, Collection<ComputedStatistics> computedStatistics)
     {
         throw new PrestoException(GENERIC_INTERNAL_ERROR, "ConnectorMetadata beginInsert() is implemented without finishInsert()");
     }
@@ -280,10 +397,18 @@ public interface ConnectorMetadata
 
     /**
      * List view names, possibly filtered by schema. An empty list is returned if none match.
+     *
+     * @deprecated replaced by {@link ConnectorMetadata#listViews(ConnectorSession, Optional)}
      */
+    @Deprecated
     default List<SchemaTableName> listViews(ConnectorSession session, String schemaNameOrNull)
     {
         return emptyList();
+    }
+
+    default List<SchemaTableName> listViews(ConnectorSession session, Optional<String> schemaName)
+    {
+        return listViews(session, schemaName.orElse(null));
     }
 
     /**
@@ -334,5 +459,13 @@ public interface ConnectorMetadata
     default void revokeTablePrivileges(ConnectorSession session, SchemaTableName tableName, Set<Privilege> privileges, String grantee, boolean grantOption)
     {
         throw new PrestoException(NOT_SUPPORTED, "This connector does not support revokes");
+    }
+
+    /**
+     * List the table privileges granted to the specified grantee for the tables that have the specified prefix
+     */
+    default List<GrantInfo> listTablePrivileges(ConnectorSession session, SchemaTablePrefix prefix)
+    {
+        return emptyList();
     }
 }

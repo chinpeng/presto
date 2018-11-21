@@ -19,12 +19,13 @@ import com.facebook.presto.raptor.metadata.ShardInfo;
 import com.facebook.presto.raptor.metadata.ShardManager;
 import com.facebook.presto.raptor.metadata.TableColumn;
 import com.facebook.presto.raptor.metadata.TableMetadata;
-import com.google.common.base.Throwables;
 import io.airlift.log.Logger;
 
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.util.List;
 import java.util.OptionalInt;
+import java.util.OptionalLong;
 import java.util.Set;
 import java.util.UUID;
 
@@ -57,8 +58,8 @@ class OrganizationJob
         try {
             runJob(organizationSet.getTableId(), organizationSet.getBucketNumber(), organizationSet.getShards());
         }
-        catch (Throwable e) {
-            throw Throwables.propagate(e);
+        catch (IOException e) {
+            throw new UncheckedIOException(e);
         }
     }
 
@@ -81,7 +82,7 @@ class OrganizationJob
         TableMetadata metadata = getTableMetadata(tableId);
         List<ShardInfo> newShards = performCompaction(transactionId, bucketNumber, shardUuids, metadata);
         log.info("Compacted shards %s into %s", shardUuids, newShards.stream().map(ShardInfo::getShardUuid).collect(toList()));
-        shardManager.replaceShardUuids(transactionId, tableId, metadata.getColumns(), shardUuids, newShards, null);
+        shardManager.replaceShardUuids(transactionId, tableId, metadata.getColumns(), shardUuids, newShards, OptionalLong.empty());
     }
 
     private TableMetadata getTableMetadata(long tableId)

@@ -14,6 +14,7 @@
 package com.facebook.presto.sql.planner.sanity;
 
 import com.facebook.presto.Session;
+import com.facebook.presto.execution.warnings.WarningCollector;
 import com.facebook.presto.metadata.Metadata;
 import com.facebook.presto.metadata.Signature;
 import com.facebook.presto.spi.type.Type;
@@ -22,13 +23,16 @@ import com.facebook.presto.spi.type.TypeSignature;
 import com.facebook.presto.sql.parser.SqlParser;
 import com.facebook.presto.sql.planner.SimplePlanVisitor;
 import com.facebook.presto.sql.planner.Symbol;
+import com.facebook.presto.sql.planner.TypeProvider;
 import com.facebook.presto.sql.planner.plan.AggregationNode;
+import com.facebook.presto.sql.planner.plan.AggregationNode.Aggregation;
 import com.facebook.presto.sql.planner.plan.PlanNode;
 import com.facebook.presto.sql.planner.plan.ProjectNode;
 import com.facebook.presto.sql.planner.plan.UnionNode;
 import com.facebook.presto.sql.planner.plan.WindowNode;
 import com.facebook.presto.sql.tree.Expression;
 import com.facebook.presto.sql.tree.FunctionCall;
+import com.facebook.presto.sql.tree.NodeRef;
 import com.facebook.presto.sql.tree.SymbolReference;
 import com.google.common.collect.ListMultimap;
 
@@ -38,6 +42,7 @@ import java.util.Map;
 import static com.facebook.presto.sql.analyzer.ExpressionAnalyzer.getExpressionTypes;
 import static com.facebook.presto.type.UnknownType.UNKNOWN;
 import static com.google.common.base.Preconditions.checkArgument;
+import static java.util.Collections.emptyList;
 import static java.util.Objects.requireNonNull;
 
 /**
@@ -49,9 +54,9 @@ public final class TypeValidator
     public TypeValidator() {}
 
     @Override
-    public void validate(PlanNode plan, Session session, Metadata metadata, SqlParser sqlParser, Map<Symbol, Type> types)
+    public void validate(PlanNode plan, Session session, Metadata metadata, SqlParser sqlParser, TypeProvider types, WarningCollector warningCollector)
     {
-        plan.accept(new Visitor(session, metadata, sqlParser, types), null);
+        plan.accept(new Visitor(session, metadata, sqlParser, types, warningCollector), null);
     }
 
     private static class Visitor
@@ -60,14 +65,16 @@ public final class TypeValidator
         private final Session session;
         private final Metadata metadata;
         private final SqlParser sqlParser;
-        private final Map<Symbol, Type> types;
+        private final TypeProvider types;
+        private final WarningCollector warningCollector;
 
-        public Visitor(Session session, Metadata metadata, SqlParser sqlParser, Map<Symbol, Type> types)
+        public Visitor(Session session, Metadata metadata, SqlParser sqlParser, TypeProvider types, WarningCollector warningCollector)
         {
             this.session = requireNonNull(session, "session is null");
             this.metadata = requireNonNull(metadata, "metadata is null");
             this.sqlParser = requireNonNull(sqlParser, "sqlParser is null");
             this.types = requireNonNull(types, "types is null");
+            this.warningCollector = requireNonNull(warningCollector, "warningCollector is null");
         }
 
         @Override
@@ -79,11 +86,11 @@ public final class TypeValidator
 
             switch (step) {
                 case SINGLE:
-                    checkFunctionSignature(node.getFunctions());
+                    checkFunctionSignature(node.getAggregations());
                     checkFunctionCall(node.getAggregations());
                     break;
                 case FINAL:
-                    checkFunctionSignature(node.getFunctions());
+                    checkFunctionSignature(node.getAggregations());
                     break;
             }
 
@@ -95,8 +102,7 @@ public final class TypeValidator
         {
             visitPlan(node, context);
 
-            checkFunctionSignature(node.getSignatures());
-            checkFunctionCall(node.getWindowFunctions());
+            checkWindowFunctions(node.getWindowFunctions());
 
             return null;
         }
@@ -113,7 +119,8 @@ public final class TypeValidator
                     verifyTypeSignature(entry.getKey(), expectedType.getTypeSignature(), types.get(Symbol.from(symbolReference)).getTypeSignature());
                     continue;
                 }
-                Type actualType = getExpressionTypes(session, metadata, sqlParser, types, entry.getValue()).get(entry.getValue());
+                Map<NodeRef<Expression>, Type> expressionTypes = getExpressionTypes(session, metadata, sqlParser, types, entry.getValue(), emptyList(), warningCollector);
+                Type actualType = expressionTypes.get(NodeRef.of(entry.getValue()));
                 verifyTypeSignature(entry.getKey(), expectedType.getTypeSignature(), actualType.getTypeSignature());
             }
 
@@ -137,21 +144,43 @@ public final class TypeValidator
             return null;
         }
 
-        private void checkFunctionSignature(Map<Symbol, Signature> functions)
+        private void checkWindowFunctions(Map<Symbol, WindowNode.Function> functions)
         {
-            for (Map.Entry<Symbol, Signature> entry : functions.entrySet()) {
-                TypeSignature expectedTypeSignature = types.get(entry.getKey()).getTypeSignature();
-                TypeSignature actualTypeSignature = entry.getValue().getReturnType();
-                verifyTypeSignature(entry.getKey(), expectedTypeSignature, actualTypeSignature);
+            for (Map.Entry<Symbol, WindowNode.Function> entry : functions.entrySet()) {
+                Signature signature = entry.getValue().getSignature();
+                FunctionCall call = entry.getValue().getFunctionCall();
+
+                checkSignature(entry.getKey(), signature);
+                checkCall(entry.getKey(), call);
             }
         }
 
-        private void checkFunctionCall(Map<Symbol, FunctionCall> functionCalls)
+        private void checkSignature(Symbol symbol, Signature signature)
         {
-            for (Map.Entry<Symbol, FunctionCall> entry : functionCalls.entrySet()) {
-                Type expectedType = types.get(entry.getKey());
-                Type actualType = getExpressionTypes(session, metadata, sqlParser, types, entry.getValue()).get(entry.getValue());
-                verifyTypeSignature(entry.getKey(), expectedType.getTypeSignature(), actualType.getTypeSignature());
+            TypeSignature expectedTypeSignature = types.get(symbol).getTypeSignature();
+            TypeSignature actualTypeSignature = signature.getReturnType();
+            verifyTypeSignature(symbol, expectedTypeSignature, actualTypeSignature);
+        }
+
+        private void checkCall(Symbol symbol, FunctionCall call)
+        {
+            Type expectedType = types.get(symbol);
+            Map<NodeRef<Expression>, Type> expressionTypes = getExpressionTypes(session, metadata, sqlParser, types, call, emptyList(), warningCollector);
+            Type actualType = expressionTypes.get(NodeRef.<Expression>of(call));
+            verifyTypeSignature(symbol, expectedType.getTypeSignature(), actualType.getTypeSignature());
+        }
+
+        private void checkFunctionSignature(Map<Symbol, Aggregation> aggregations)
+        {
+            for (Map.Entry<Symbol, Aggregation> entry : aggregations.entrySet()) {
+                checkSignature(entry.getKey(), entry.getValue().getSignature());
+            }
+        }
+
+        private void checkFunctionCall(Map<Symbol, Aggregation> aggregations)
+        {
+            for (Map.Entry<Symbol, Aggregation> entry : aggregations.entrySet()) {
+                checkCall(entry.getKey(), entry.getValue().getCall());
             }
         }
 

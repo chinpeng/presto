@@ -30,7 +30,7 @@ public interface ShardManager
     /**
      * Create a table.
      */
-    void createTable(long tableId, List<ColumnInfo> columns, boolean bucketed);
+    void createTable(long tableId, List<ColumnInfo> columns, boolean bucketed, OptionalLong temporalColumnId);
 
     /**
      * Drop a table.
@@ -53,6 +53,11 @@ public interface ShardManager
     void replaceShardUuids(long transactionId, long tableId, List<ColumnInfo> columns, Set<UUID> oldShardUuids, Collection<ShardInfo> newShards, OptionalLong updateTime);
 
     /**
+     * Get shard metadata for a shard.
+     */
+    ShardMetadata getShard(UUID shardUuid);
+
+    /**
      * Get shard metadata for shards on a given node.
      */
     Set<ShardMetadata> getNodeShards(String nodeIdentifier);
@@ -73,14 +78,9 @@ public interface ShardManager
     ResultIterator<BucketShards> getShardNodesBucketed(long tableId, boolean merged, Map<Integer, String> bucketToNode, TupleDomain<RaptorColumnHandle> effectivePredicate);
 
     /**
-     * Assign a shard to a node.
+     * Remove all old shard assignments and assign a shard to a node
      */
-    void assignShard(long tableId, UUID shardUuid, String nodeIdentifier, boolean gracePeriod);
-
-    /**
-     * Remove shard assignment from a node.
-     */
-    void unassignShard(long tableId, UUID shardUuid, String nodeIdentifier);
+    void replaceShardAssignment(long tableId, UUID shardUuid, String nodeIdentifier, boolean gracePeriod);
 
     /**
      * Get the number of bytes used by assigned shards per node.
@@ -105,9 +105,29 @@ public interface ShardManager
     void createBuckets(long distributionId, int bucketCount);
 
     /**
-     * Get map of buckets to node identifiers for a table.
+     * Get map of buckets to node identifiers for a distribution.
      */
     Map<Integer, String> getBucketAssignments(long distributionId);
+
+    /**
+     * Change the node a bucket is assigned to.
+     */
+    void updateBucketAssignment(long distributionId, int bucketNumber, String nodeId);
+
+    /**
+     * Get all active distributions.
+     */
+    List<Distribution> getDistributions();
+
+    /**
+     * Get total physical size of all tables in a distribution.
+     */
+    long getDistributionSizeInBytes(long distributionId);
+
+    /**
+     * Get list of bucket nodes for a distribution.
+     */
+    List<BucketNode> getBucketNodes(long distributionId);
 
     /**
      * Return the subset of shard uuids that exist

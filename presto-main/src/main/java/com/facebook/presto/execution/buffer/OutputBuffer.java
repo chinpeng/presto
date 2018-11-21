@@ -16,11 +16,10 @@ package com.facebook.presto.execution.buffer;
 import com.facebook.presto.OutputBuffers;
 import com.facebook.presto.OutputBuffers.OutputBufferId;
 import com.facebook.presto.execution.StateMachine.StateChangeListener;
-import com.facebook.presto.spi.Page;
 import com.google.common.util.concurrent.ListenableFuture;
 import io.airlift.units.DataSize;
 
-import java.util.concurrent.CompletableFuture;
+import java.util.List;
 
 public interface OutputBuffer
 {
@@ -42,6 +41,11 @@ public interface OutputBuffer
     double getUtilization();
 
     /**
+     * Check if the buffer is blocking producers.
+     */
+    boolean isOverutilized();
+
+    /**
      * Add a listener which fires anytime the buffer state changes.
      */
     void addStateChangeListener(StateChangeListener<BufferState> stateChangeListener);
@@ -58,7 +62,12 @@ public interface OutputBuffer
      * If the buffer result is marked as complete, the client must call abort to acknowledge
      * receipt of the final state.
      */
-    CompletableFuture<BufferResult> get(OutputBufferId bufferId, long token, DataSize maxSize);
+    ListenableFuture<BufferResult> get(OutputBufferId bufferId, long token, DataSize maxSize);
+
+    /**
+     * Acknowledges the previously received pages from the output buffer.
+     */
+    void acknowledge(OutputBufferId bufferId, long token);
 
     /**
      * Closes the specified output buffer.
@@ -66,16 +75,21 @@ public interface OutputBuffer
     void abort(OutputBufferId bufferId);
 
     /**
-     * Adds a page to an unpartitioned buffer. If no-more-pages has been set, the enqueue
-     * page call is ignored.  This can happen with limit queries.
+     * Get a future that will be completed when the buffer is not full.
      */
-    ListenableFuture<?> enqueue(Page page);
+    ListenableFuture<?> isFull();
 
     /**
-     * Adds a page so a specific partition.  If no-more-pages has been set, the enqueue
+     * Adds a split-up page to an unpartitioned buffer. If no-more-pages has been set, the enqueue
      * page call is ignored.  This can happen with limit queries.
      */
-    ListenableFuture<?> enqueue(int partition, Page page);
+    void enqueue(List<SerializedPage> pages);
+
+    /**
+     * Adds a split-up page to a specific partition.  If no-more-pages has been set, the enqueue
+     * page call is ignored.  This can happen with limit queries.
+     */
+    void enqueue(int partition, List<SerializedPage> pages);
 
     /**
      * Notify buffer that no more pages will be added. Any future calls to enqueue a
@@ -93,4 +107,9 @@ public interface OutputBuffer
      * readers will be unblocked when the failed query is cleaned up.
      */
     void fail();
+
+    /**
+     * @return the peak memory usage of this output buffer.
+     */
+    long getPeakMemoryUsage();
 }

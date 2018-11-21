@@ -14,45 +14,62 @@
 package com.facebook.presto.hive.metastore;
 
 import com.facebook.presto.hive.HiveType;
-import org.apache.hadoop.hive.metastore.api.Database;
-import org.apache.hadoop.hive.metastore.api.PrincipalPrivilegeSet;
-import org.apache.hadoop.hive.metastore.api.PrivilegeGrantInfo;
+import com.facebook.presto.hive.PartitionStatistics;
+import com.facebook.presto.spi.statistics.ColumnStatisticType;
+import com.facebook.presto.spi.type.Type;
 
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.function.Function;
 
 public interface ExtendedHiveMetastore
 {
-    void flushCache();
-
     Optional<Database> getDatabase(String databaseName);
 
     List<String> getAllDatabases();
 
     Optional<Table> getTable(String databaseName, String tableName);
 
+    Set<ColumnStatisticType> getSupportedColumnStatistics(Type type);
+
+    PartitionStatistics getTableStatistics(String databaseName, String tableName);
+
+    Map<String, PartitionStatistics> getPartitionStatistics(String databaseName, String tableName, Set<String> partitionNames);
+
+    void updateTableStatistics(String databaseName, String tableName, Function<PartitionStatistics, PartitionStatistics> update);
+
+    void updatePartitionStatistics(String databaseName, String tableName, String partitionName, Function<PartitionStatistics, PartitionStatistics> update);
+
     Optional<List<String>> getAllTables(String databaseName);
 
     Optional<List<String>> getAllViews(String databaseName);
 
-    void createTable(Table table, PrincipalPrivilegeSet principalPrivilegeSet);
+    void createDatabase(Database database);
 
-    void dropTable(String databaseName, String tableName);
+    void dropDatabase(String databaseName);
+
+    void renameDatabase(String databaseName, String newDatabaseName);
+
+    void createTable(Table table, PrincipalPrivileges principalPrivileges);
+
+    void dropTable(String databaseName, String tableName, boolean deleteData);
 
     /**
      * This should only be used if the semantic here is drop and add. Trying to
      * alter one field of a table object previously acquired from getTable is
      * probably not what you want.
      */
-    void replaceTable(String databaseName, String tableName, Table newTable, PrincipalPrivilegeSet principalPrivilegeSet);
+    void replaceTable(String databaseName, String tableName, Table newTable, PrincipalPrivileges principalPrivileges);
 
     void renameTable(String databaseName, String tableName, String newDatabaseName, String newTableName);
 
     void addColumn(String databaseName, String tableName, String columnName, HiveType columnType, String columnComment);
 
     void renameColumn(String databaseName, String tableName, String oldColumnName, String newColumnName);
+
+    void dropColumn(String databaseName, String tableName, String columnName);
 
     Optional<Partition> getPartition(String databaseName, String tableName, List<String> partitionValues);
 
@@ -62,14 +79,11 @@ public interface ExtendedHiveMetastore
 
     Map<String, Optional<Partition>> getPartitionsByNames(String databaseName, String tableName, List<String> partitionNames);
 
-    /**
-     * Adds partitions to the table in a single atomic task.  The implementation
-     * must either add all partitions and return normally, or add no partitions and
-     * throw an exception.
-     */
-    void addPartitions(String databaseName, String tableName, List<Partition> partitions);
+    void addPartitions(String databaseName, String tableName, List<PartitionWithStatistics> partitions);
 
-    void dropPartition(String databaseName, String tableName, List<String> parts);
+    void dropPartition(String databaseName, String tableName, List<String> parts, boolean deleteData);
+
+    void alterPartition(String databaseName, String tableName, PartitionWithStatistics partition);
 
     Set<String> getRoles(String user);
 
@@ -77,7 +91,7 @@ public interface ExtendedHiveMetastore
 
     Set<HivePrivilegeInfo> getTablePrivileges(String user, String databaseName, String tableName);
 
-    void grantTablePrivileges(String databaseName, String tableName, String grantee, Set<PrivilegeGrantInfo> privilegeGrantInfoSet);
+    void grantTablePrivileges(String databaseName, String tableName, String grantee, Set<HivePrivilegeInfo> privileges);
 
-    void revokeTablePrivileges(String databaseName, String tableName, String grantee, Set<PrivilegeGrantInfo> privilegeGrantInfoSet);
+    void revokeTablePrivileges(String databaseName, String tableName, String grantee, Set<HivePrivilegeInfo> privileges);
 }

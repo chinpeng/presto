@@ -13,23 +13,18 @@
  */
 package com.facebook.presto.spi.block;
 
-import com.facebook.presto.spi.type.TypeManager;
 import io.airlift.slice.SliceInput;
 import io.airlift.slice.SliceOutput;
 import io.airlift.slice.Slices;
 
+import static com.facebook.presto.spi.block.ArrayBlock.createArrayBlockInternal;
+import static com.facebook.presto.spi.block.EncoderUtil.decodeNullBits;
+import static com.facebook.presto.spi.block.EncoderUtil.encodeNullsAsBits;
+
 public class ArrayBlockEncoding
         implements BlockEncoding
 {
-    public static final BlockEncodingFactory<ArrayBlockEncoding> FACTORY = new ArrayBlockEncodingFactory();
-    private static final String NAME = "ARRAY";
-
-    private final BlockEncoding valueBlockEncoding;
-
-    public ArrayBlockEncoding(BlockEncoding valueBlockEncoding)
-    {
-        this.valueBlockEncoding = valueBlockEncoding;
-    }
+    public static final String NAME = "ARRAY";
 
     @Override
     public String getName()
@@ -38,56 +33,36 @@ public class ArrayBlockEncoding
     }
 
     @Override
-    public void writeBlock(SliceOutput sliceOutput, Block block)
+    public void writeBlock(BlockEncodingSerde blockEncodingSerde, SliceOutput sliceOutput, Block block)
     {
         AbstractArrayBlock arrayBlock = (AbstractArrayBlock) block;
 
-        valueBlockEncoding.writeBlock(sliceOutput, arrayBlock.getValues());
-        sliceOutput.appendInt(arrayBlock.getOffsetBase());
         int positionCount = arrayBlock.getPositionCount();
+
+        int offsetBase = arrayBlock.getOffsetBase();
+        int[] offsets = arrayBlock.getOffsets();
+
+        int valuesStartOffset = offsets[offsetBase];
+        int valuesEndOffset = offsets[offsetBase + positionCount];
+        Block values = arrayBlock.getRawElementBlock().getRegion(valuesStartOffset, valuesEndOffset - valuesStartOffset);
+        blockEncodingSerde.writeBlock(sliceOutput, values);
+
         sliceOutput.appendInt(positionCount);
-        sliceOutput.writeBytes(arrayBlock.getOffsets(), 0, positionCount * 4);
-        EncoderUtil.encodeNullsAsBits(sliceOutput, block);
+        for (int position = 0; position < positionCount + 1; position++) {
+            sliceOutput.writeInt(offsets[offsetBase + position] - valuesStartOffset);
+        }
+        encodeNullsAsBits(sliceOutput, block);
     }
 
     @Override
-    public Block readBlock(SliceInput sliceInput)
+    public Block readBlock(BlockEncodingSerde blockEncodingSerde, SliceInput sliceInput)
     {
-        Block values = valueBlockEncoding.readBlock(sliceInput);
-        int offsetBase = sliceInput.readInt();
+        Block values = blockEncodingSerde.readBlock(sliceInput);
+
         int positionCount = sliceInput.readInt();
-        byte[] offsets = new byte[positionCount * 4];
-        sliceInput.readBytes(offsets);
-        boolean[] valueIsNull = EncoderUtil.decodeNullBits(sliceInput, positionCount);
-        return new ArrayBlock(values, Slices.wrappedBuffer(offsets), offsetBase, Slices.wrappedBooleanArray(valueIsNull));
-    }
-
-    @Override
-    public BlockEncodingFactory getFactory()
-    {
-        return FACTORY;
-    }
-
-    public static class ArrayBlockEncodingFactory
-            implements BlockEncodingFactory<ArrayBlockEncoding>
-    {
-        @Override
-        public String getName()
-        {
-            return NAME;
-        }
-
-        @Override
-        public ArrayBlockEncoding readEncoding(TypeManager manager, BlockEncodingSerde serde, SliceInput input)
-        {
-            BlockEncoding valueBlockEncoding = serde.readBlockEncoding(input);
-            return new ArrayBlockEncoding(valueBlockEncoding);
-        }
-
-        @Override
-        public void writeEncoding(BlockEncodingSerde serde, SliceOutput output, ArrayBlockEncoding blockEncoding)
-        {
-            serde.writeBlockEncoding(output, blockEncoding.valueBlockEncoding);
-        }
+        int[] offsets = new int[positionCount + 1];
+        sliceInput.readBytes(Slices.wrappedIntArray(offsets));
+        boolean[] valueIsNull = decodeNullBits(sliceInput, positionCount).orElseGet(() -> new boolean[positionCount]);
+        return createArrayBlockInternal(0, positionCount, valueIsNull, offsets, values);
     }
 }

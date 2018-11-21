@@ -11,6 +11,14 @@ and return null for no input rows or when all values are null. For example,
 values in the count. The ``coalesce`` function can be used to convert null into
 zero.
 
+Some aggregate functions such as :func:`array_agg` produce different results
+depending on the order of input values. This ordering can be specified by writing
+an :ref:`order-by-clause` within the aggregate function::
+
+    array_agg(x ORDER BY y DESC)
+    array_agg(x ORDER BY x, y, z)
+
+
 General Aggregate Functions
 ---------------------------
 
@@ -25,6 +33,10 @@ General Aggregate Functions
 .. function:: avg(x) -> double
 
     Returns the average (arithmetic mean) of all input values.
+
+.. function:: avg(time interval type) -> time interval type
+
+    Returns the average interval length of all input values.
 
 .. function:: bool_and(boolean) -> boolean
 
@@ -65,8 +77,8 @@ General Aggregate Functions
 
 .. function:: max_by(x, y, n) -> array<[same as x]>
 
-    Returns ``n`` values of ``x`` associated with the ``n`` largest of all input values of ``y``,
-    in non-ascending order of ``y``.
+    Returns ``n`` values of ``x`` associated with the ``n`` largest of all input values of ``y``
+    in descending order of ``y``.
 
 .. function:: min_by(x, y) -> [same as x]
 
@@ -74,8 +86,8 @@ General Aggregate Functions
 
 .. function:: min_by(x, y, n) -> array<[same as x]>
 
-    Returns ``n`` values of ``x`` associated with the ``n`` smallest of all input values of ``y``,
-    in non-descending order of ``y``.
+    Returns ``n`` values of ``x`` associated with the ``n`` smallest of all input values of ``y``
+    in ascending order of ``y``.
 
 .. function:: max(x) -> [same as input]
 
@@ -97,23 +109,34 @@ General Aggregate Functions
 
     Returns the sum of all input values.
 
+Bitwise Aggregate Functions
+---------------------------
+
+.. function:: bitwise_and_agg(x) -> bigint
+
+    Returns the bitwise AND of all input values in 2's complement representation.
+
+.. function:: bitwise_or_agg(x) -> bigint
+
+    Returns the bitwise OR of all input values in 2's complement representation.
+
 Map Aggregate Functions
 -----------------------
 
-.. function:: histogram(x) -> map<K,bigint>
+.. function:: histogram(x) -> map(K,bigint)
 
     Returns a map containing the count of the number of times each input value occurs.
 
-.. function:: map_agg(key, value) -> map<K,V>
+.. function:: map_agg(key, value) -> map(K,V)
 
     Returns a map created from the input ``key`` / ``value`` pairs.
 
-.. function:: map_union(x<K,V>) -> map<K,V>
+.. function:: map_union(x(K,V)) -> map(K,V)
 
    Returns the union of all the input maps. If a key is found in multiple
    input maps, that key's value in the resulting map comes from an arbitrary input map.
 
-.. function:: multimap_agg(key, value) -> map<K,array<V>>
+.. function:: multimap_agg(key, value) -> map(K,array(V))
 
     Returns a multimap created from the input ``key`` / ``value`` pairs.
     Each key can be associated with multiple values.
@@ -142,7 +165,7 @@ Approximate Aggregate Functions
     is the standard deviation of the (approximately normal) error distribution
     over all possible sets. It does not guarantee an upper bound on the error
     for any specific input set. The current implementation of this function
-    requires that ``e`` be in the range: [0.01150, 0.26000].
+    requires that ``e`` be in the range of ``[0.0040625, 0.26000]``.
 
 .. function:: approx_percentile(x, percentage) -> [same as x]
 
@@ -183,6 +206,36 @@ Approximate Aggregate Functions
     Each element of the array must be between zero and one, and the array must
     be constant for all input rows.
 
+.. function:: approx_set(x) -> HyperLogLog
+    :noindex:
+
+    See :doc:`hyperloglog`.
+
+.. function:: merge(x) -> HyperLogLog
+    :noindex:
+
+    See :doc:`hyperloglog`.
+
+.. function:: merge(qdigest(T)) -> qdigest(T)
+    :noindex:
+
+    See :doc:`qdigest`.
+
+.. function:: qdigest_agg(x) -> qdigest<[same as x]>
+    :noindex:
+
+    See :doc:`qdigest`.
+
+.. function:: qdigest_agg(x, w) -> qdigest<[same as x]>
+    :noindex:
+
+    See :doc:`qdigest`.
+
+.. function:: qdigest_agg(x, w, accuracy) -> qdigest<[same as x]>
+    :noindex:
+
+    See :doc:`qdigest`.
+
 .. function:: numeric_histogram(buckets, value, weight) -> map<double, double>
 
     Computes an approximate histogram with up to ``buckets`` number of buckets
@@ -217,6 +270,15 @@ Statistical Aggregate Functions
 
     Returns the sample covariance of input values.
 
+.. function:: kurtosis(x) -> double
+
+    Returns the excess kurtosis of all input values. Unbiased estimate using
+    the following expression:
+
+    .. code-block:: none
+
+        kurtosis(x) = n(n+1)/((n-1)(n-2)(n-3))sum[(x_i-mean)^4]/stddev(x)^4-3(n-1)^2/((n-2)(n-3))
+
 .. function:: regr_intercept(y, x) -> double
 
     Returns linear regression intercept of input values. ``y`` is the dependent
@@ -226,6 +288,10 @@ Statistical Aggregate Functions
 
     Returns linear regression slope of input values. ``y`` is the dependent
     value. ``x`` is the independent value.
+
+.. function:: skewness(x) -> double
+
+    Returns the skewness of all input values.
 
 .. function:: stddev(x) -> double
 

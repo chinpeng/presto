@@ -17,6 +17,7 @@ import com.facebook.presto.spi.block.Block;
 import com.facebook.presto.spi.block.BlockBuilder;
 import com.facebook.presto.spi.block.BlockBuilderStatus;
 import com.facebook.presto.spi.block.FixedWidthBlockBuilder;
+import com.facebook.presto.spi.block.PageBuilderStatus;
 import io.airlift.slice.Slice;
 
 public abstract class AbstractFixedWidthType
@@ -40,10 +41,17 @@ public abstract class AbstractFixedWidthType
     @Override
     public final BlockBuilder createBlockBuilder(BlockBuilderStatus blockBuilderStatus, int expectedEntries, int expectedBytesPerEntry)
     {
+        int maxBlockSizeInBytes;
+        if (blockBuilderStatus == null) {
+            maxBlockSizeInBytes = PageBuilderStatus.DEFAULT_MAX_PAGE_SIZE_IN_BYTES;
+        }
+        else {
+            maxBlockSizeInBytes = blockBuilderStatus.getMaxPageSizeInBytes();
+        }
         return new FixedWidthBlockBuilder(
                 getFixedSize(),
                 blockBuilderStatus,
-                fixedSize == 0 ? expectedEntries : Math.min(expectedEntries, blockBuilderStatus.getMaxBlockSizeInBytes() / fixedSize));
+                fixedSize == 0 ? expectedEntries : Math.min(expectedEntries, maxBlockSizeInBytes / fixedSize));
     }
 
     @Override

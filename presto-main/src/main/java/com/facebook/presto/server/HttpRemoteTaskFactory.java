@@ -43,6 +43,7 @@ import org.weakref.jmx.Nested;
 import javax.annotation.PreDestroy;
 import javax.inject.Inject;
 
+import java.util.OptionalInt;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.ScheduledExecutorService;
@@ -61,7 +62,7 @@ public class HttpRemoteTaskFactory
     private final JsonCodec<TaskStatus> taskStatusCodec;
     private final JsonCodec<TaskInfo> taskInfoCodec;
     private final JsonCodec<TaskUpdateRequest> taskUpdateRequestCodec;
-    private final Duration minErrorDuration;
+    private final Duration maxErrorDuration;
     private final Duration taskStatusRefreshMaxWait;
     private final Duration taskInfoUpdateInterval;
     private final ExecutorService coreExecutor;
@@ -86,7 +87,7 @@ public class HttpRemoteTaskFactory
         this.taskStatusCodec = taskStatusCodec;
         this.taskInfoCodec = taskInfoCodec;
         this.taskUpdateRequestCodec = taskUpdateRequestCodec;
-        this.minErrorDuration = config.getRemoteTaskMinErrorDuration();
+        this.maxErrorDuration = config.getRemoteTaskMaxErrorDuration();
         this.taskStatusRefreshMaxWait = taskConfig.getStatusRefreshMaxWait();
         this.taskInfoUpdateInterval = taskConfig.getInfoUpdateInterval();
         this.coreExecutor = newCachedThreadPool(daemonThreadsNamed("remote-task-callback-%s"));
@@ -119,6 +120,7 @@ public class HttpRemoteTaskFactory
             Node node,
             PlanFragment fragment,
             Multimap<PlanNodeId, Split> initialSplits,
+            OptionalInt totalPartitions,
             OutputBuffers outputBuffers,
             PartitionedSplitCountTracker partitionedSplitCountTracker,
             boolean summarizeTaskInfo)
@@ -129,12 +131,13 @@ public class HttpRemoteTaskFactory
                 locationFactory.createTaskLocation(node, taskId),
                 fragment,
                 initialSplits,
+                totalPartitions,
                 outputBuffers,
                 httpClient,
                 executor,
                 updateScheduledExecutor,
                 errorScheduledExecutor,
-                minErrorDuration,
+                maxErrorDuration,
                 taskStatusRefreshMaxWait,
                 taskInfoUpdateInterval,
                 summarizeTaskInfo,

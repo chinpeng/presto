@@ -17,7 +17,8 @@ import com.facebook.presto.metadata.InsertTableHandle;
 import com.facebook.presto.metadata.NewTableLayout;
 import com.facebook.presto.metadata.OutputTableHandle;
 import com.facebook.presto.metadata.TableHandle;
-import com.facebook.presto.metadata.TableMetadata;
+import com.facebook.presto.spi.ConnectorTableMetadata;
+import com.facebook.presto.spi.SchemaTableName;
 import com.facebook.presto.sql.planner.PartitioningScheme;
 import com.facebook.presto.sql.planner.Symbol;
 import com.fasterxml.jackson.annotation.JsonCreator;
@@ -25,6 +26,7 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.annotation.JsonSubTypes;
 import com.fasterxml.jackson.annotation.JsonTypeInfo;
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.Iterables;
 
 import javax.annotation.concurrent.Immutable;
 
@@ -40,22 +42,27 @@ public class TableWriterNode
 {
     private final PlanNode source;
     private final WriterTarget target;
-    private final List<Symbol> outputs;
+    private final Symbol rowCountSymbol;
+    private final Symbol fragmentSymbol;
     private final List<Symbol> columns;
     private final List<String> columnNames;
-    private final Optional<Symbol> sampleWeightSymbol;
     private final Optional<PartitioningScheme> partitioningScheme;
+    private final Optional<StatisticAggregations> statisticsAggregation;
+    private final Optional<StatisticAggregationsDescriptor<Symbol>> statisticsAggregationDescriptor;
+    private final List<Symbol> outputs;
 
     @JsonCreator
     public TableWriterNode(
             @JsonProperty("id") PlanNodeId id,
             @JsonProperty("source") PlanNode source,
             @JsonProperty("target") WriterTarget target,
+            @JsonProperty("rowCountSymbol") Symbol rowCountSymbol,
+            @JsonProperty("fragmentSymbol") Symbol fragmentSymbol,
             @JsonProperty("columns") List<Symbol> columns,
             @JsonProperty("columnNames") List<String> columnNames,
-            @JsonProperty("outputs") List<Symbol> outputs,
-            @JsonProperty("sampleWeightSymbol") Optional<Symbol> sampleWeightSymbol,
-            @JsonProperty("partitioningScheme") Optional<PartitioningScheme> partitioningScheme)
+            @JsonProperty("partitioningScheme") Optional<PartitioningScheme> partitioningScheme,
+            @JsonProperty("statisticsAggregation") Optional<StatisticAggregations> statisticsAggregation,
+            @JsonProperty("statisticsAggregationDescriptor") Optional<StatisticAggregationsDescriptor<Symbol>> statisticsAggregationDescriptor)
     {
         super(id);
 
@@ -65,17 +72,23 @@ public class TableWriterNode
 
         this.source = requireNonNull(source, "source is null");
         this.target = requireNonNull(target, "target is null");
+        this.rowCountSymbol = requireNonNull(rowCountSymbol, "rowCountSymbol is null");
+        this.fragmentSymbol = requireNonNull(fragmentSymbol, "fragmentSymbol is null");
         this.columns = ImmutableList.copyOf(columns);
         this.columnNames = ImmutableList.copyOf(columnNames);
-        this.outputs = ImmutableList.copyOf(requireNonNull(outputs, "outputs is null"));
-        this.sampleWeightSymbol = requireNonNull(sampleWeightSymbol, "sampleWeightSymbol is null");
         this.partitioningScheme = requireNonNull(partitioningScheme, "partitioningScheme is null");
-    }
+        this.statisticsAggregation = requireNonNull(statisticsAggregation, "statisticsAggregation is null");
+        this.statisticsAggregationDescriptor = requireNonNull(statisticsAggregationDescriptor, "statisticsAggregationDescriptor is null");
+        checkArgument(statisticsAggregation.isPresent() == statisticsAggregationDescriptor.isPresent(), "statisticsAggregation and statisticsAggregationDescriptor must be either present or absent");
 
-    @JsonProperty
-    public Optional<Symbol> getSampleWeightSymbol()
-    {
-        return sampleWeightSymbol;
+        ImmutableList.Builder<Symbol> outputs = ImmutableList.<Symbol>builder()
+                .add(rowCountSymbol)
+                .add(fragmentSymbol);
+        statisticsAggregation.ifPresent(aggregation -> {
+            outputs.addAll(aggregation.getGroupingSymbols());
+            outputs.addAll(aggregation.getAggregations().keySet());
+        });
+        this.outputs = outputs.build();
     }
 
     @JsonProperty
@@ -91,6 +104,18 @@ public class TableWriterNode
     }
 
     @JsonProperty
+    public Symbol getRowCountSymbol()
+    {
+        return rowCountSymbol;
+    }
+
+    @JsonProperty
+    public Symbol getFragmentSymbol()
+    {
+        return fragmentSymbol;
+    }
+
+    @JsonProperty
     public List<Symbol> getColumns()
     {
         return columns;
@@ -102,17 +127,22 @@ public class TableWriterNode
         return columnNames;
     }
 
-    @JsonProperty("outputs")
-    @Override
-    public List<Symbol> getOutputSymbols()
-    {
-        return outputs;
-    }
-
     @JsonProperty
     public Optional<PartitioningScheme> getPartitioningScheme()
     {
         return partitioningScheme;
+    }
+
+    @JsonProperty
+    public Optional<StatisticAggregations> getStatisticsAggregation()
+    {
+        return statisticsAggregation;
+    }
+
+    @JsonProperty
+    public Optional<StatisticAggregationsDescriptor<Symbol>> getStatisticsAggregationDescriptor()
+    {
+        return statisticsAggregationDescriptor;
     }
 
     @Override
@@ -122,17 +152,28 @@ public class TableWriterNode
     }
 
     @Override
-    public <C, R> R accept(PlanVisitor<C, R> visitor, C context)
+    public List<Symbol> getOutputSymbols()
+    {
+        return outputs;
+    }
+
+    @Override
+    public <R, C> R accept(PlanVisitor<R, C> visitor, C context)
     {
         return visitor.visitTableWriter(this, context);
+    }
+
+    @Override
+    public PlanNode replaceChildren(List<PlanNode> newChildren)
+    {
+        return new TableWriterNode(getId(), Iterables.getOnlyElement(newChildren), target, rowCountSymbol, fragmentSymbol, columns, columnNames, partitioningScheme, statisticsAggregation, statisticsAggregationDescriptor);
     }
 
     @JsonTypeInfo(use = JsonTypeInfo.Id.NAME, property = "@type")
     @JsonSubTypes({
             @JsonSubTypes.Type(value = CreateHandle.class, name = "CreateHandle"),
             @JsonSubTypes.Type(value = InsertHandle.class, name = "InsertHandle"),
-            @JsonSubTypes.Type(value = DeleteHandle.class, name = "DeleteHandle"),
-    })
+            @JsonSubTypes.Type(value = DeleteHandle.class, name = "DeleteHandle")})
     @SuppressWarnings({"EmptyClass", "ClassMayBeInterface"})
     public abstract static class WriterTarget
     {
@@ -145,10 +186,10 @@ public class TableWriterNode
             extends WriterTarget
     {
         private final String catalog;
-        private final TableMetadata tableMetadata;
+        private final ConnectorTableMetadata tableMetadata;
         private final Optional<NewTableLayout> layout;
 
-        public CreateName(String catalog, TableMetadata tableMetadata, Optional<NewTableLayout> layout)
+        public CreateName(String catalog, ConnectorTableMetadata tableMetadata, Optional<NewTableLayout> layout)
         {
             this.catalog = requireNonNull(catalog, "catalog is null");
             this.tableMetadata = requireNonNull(tableMetadata, "tableMetadata is null");
@@ -160,7 +201,7 @@ public class TableWriterNode
             return catalog;
         }
 
-        public TableMetadata getTableMetadata()
+        public ConnectorTableMetadata getTableMetadata()
         {
             return tableMetadata;
         }
@@ -181,17 +222,27 @@ public class TableWriterNode
             extends WriterTarget
     {
         private final OutputTableHandle handle;
+        private final SchemaTableName schemaTableName;
 
         @JsonCreator
-        public CreateHandle(@JsonProperty("handle") OutputTableHandle handle)
+        public CreateHandle(
+                @JsonProperty("handle") OutputTableHandle handle,
+                @JsonProperty("schemaTableName") SchemaTableName schemaTableName)
         {
             this.handle = requireNonNull(handle, "handle is null");
+            this.schemaTableName = requireNonNull(schemaTableName, "schemaTableName is null");
         }
 
         @JsonProperty
         public OutputTableHandle getHandle()
         {
             return handle;
+        }
+
+        @JsonProperty
+        public SchemaTableName getSchemaTableName()
+        {
+            return schemaTableName;
         }
 
         @Override
@@ -228,17 +279,27 @@ public class TableWriterNode
             extends WriterTarget
     {
         private final InsertTableHandle handle;
+        private final SchemaTableName schemaTableName;
 
         @JsonCreator
-        public InsertHandle(@JsonProperty("handle") InsertTableHandle handle)
+        public InsertHandle(
+                @JsonProperty("handle") InsertTableHandle handle,
+                @JsonProperty("schemaTableName") SchemaTableName schemaTableName)
         {
             this.handle = requireNonNull(handle, "handle is null");
+            this.schemaTableName = requireNonNull(schemaTableName, "schemaTableName is null");
         }
 
         @JsonProperty
         public InsertTableHandle getHandle()
         {
             return handle;
+        }
+
+        @JsonProperty
+        public SchemaTableName getSchemaTableName()
+        {
+            return schemaTableName;
         }
 
         @Override
@@ -252,17 +313,27 @@ public class TableWriterNode
             extends WriterTarget
     {
         private final TableHandle handle;
+        private final SchemaTableName schemaTableName;
 
         @JsonCreator
-        public DeleteHandle(@JsonProperty("handle") TableHandle handle)
+        public DeleteHandle(
+                @JsonProperty("handle") TableHandle handle,
+                @JsonProperty("schemaTableName") SchemaTableName schemaTableName)
         {
             this.handle = requireNonNull(handle, "handle is null");
+            this.schemaTableName = requireNonNull(schemaTableName, "schemaTableName is null");
         }
 
         @JsonProperty
         public TableHandle getHandle()
         {
             return handle;
+        }
+
+        @JsonProperty
+        public SchemaTableName getSchemaTableName()
+        {
+            return schemaTableName;
         }
 
         @Override

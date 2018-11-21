@@ -11,17 +11,14 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 package com.facebook.presto.operator.aggregation;
 
 import com.facebook.presto.spi.block.Block;
 import com.facebook.presto.spi.block.BlockBuilder;
-import com.facebook.presto.spi.block.BlockBuilderStatus;
 import com.facebook.presto.spi.type.DecimalType;
 import com.facebook.presto.spi.type.SqlDecimal;
 import com.google.common.collect.ImmutableList;
 
-import java.math.BigInteger;
 import java.util.List;
 
 public class TestShortDecimalMaxAggregation
@@ -32,7 +29,7 @@ public class TestShortDecimalMaxAggregation
     @Override
     public Block[] getSequenceBlocks(int start, int length)
     {
-        BlockBuilder blockBuilder = SHORT_DECIMAL.createBlockBuilder(new BlockBuilderStatus(), length);
+        BlockBuilder blockBuilder = SHORT_DECIMAL.createBlockBuilder(null, length);
         for (int i = start; i < start + length; i++) {
             SHORT_DECIMAL.writeLong(blockBuilder, i);
         }
@@ -45,7 +42,7 @@ public class TestShortDecimalMaxAggregation
         if (length == 0) {
             return null;
         }
-        return new SqlDecimal(BigInteger.valueOf(start + length - 1), 10, 5);
+        return SqlDecimal.of(start + length - 1, 10, 5);
     }
 
     @Override

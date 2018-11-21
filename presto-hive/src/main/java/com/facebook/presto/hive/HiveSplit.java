@@ -22,6 +22,9 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 
 import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.Properties;
 
@@ -32,10 +35,10 @@ import static java.util.Objects.requireNonNull;
 public class HiveSplit
         implements ConnectorSplit
 {
-    private final String clientId;
     private final String path;
     private final long start;
     private final long length;
+    private final long fileSize;
     private final Properties schema;
     private final List<HivePartitionKey> partitionKeys;
     private final List<HostAddress> addresses;
@@ -45,26 +48,30 @@ public class HiveSplit
     private final TupleDomain<HiveColumnHandle> effectivePredicate;
     private final OptionalInt bucketNumber;
     private final boolean forceLocalScheduling;
+    private final Map<Integer, HiveType> columnCoercions; // key: hiveColumnIndex
+    private final Optional<BucketConversion> bucketConversion;
 
     @JsonCreator
     public HiveSplit(
-            @JsonProperty("clientId") String clientId,
             @JsonProperty("database") String database,
             @JsonProperty("table") String table,
             @JsonProperty("partitionName") String partitionName,
             @JsonProperty("path") String path,
             @JsonProperty("start") long start,
             @JsonProperty("length") long length,
+            @JsonProperty("fileSize") long fileSize,
             @JsonProperty("schema") Properties schema,
             @JsonProperty("partitionKeys") List<HivePartitionKey> partitionKeys,
             @JsonProperty("addresses") List<HostAddress> addresses,
             @JsonProperty("bucketNumber") OptionalInt bucketNumber,
             @JsonProperty("forceLocalScheduling") boolean forceLocalScheduling,
-            @JsonProperty("effectivePredicate") TupleDomain<HiveColumnHandle> effectivePredicate)
+            @JsonProperty("effectivePredicate") TupleDomain<HiveColumnHandle> effectivePredicate,
+            @JsonProperty("columnCoercions") Map<Integer, HiveType> columnCoercions,
+            @JsonProperty("bucketConversion") Optional<BucketConversion> bucketConversion)
     {
-        requireNonNull(clientId, "clientId is null");
         checkArgument(start >= 0, "start must be positive");
         checkArgument(length >= 0, "length must be positive");
+        checkArgument(fileSize >= 0, "fileSize must be positive");
         requireNonNull(database, "database is null");
         requireNonNull(table, "table is null");
         requireNonNull(partitionName, "partitionName is null");
@@ -74,26 +81,24 @@ public class HiveSplit
         requireNonNull(addresses, "addresses is null");
         requireNonNull(bucketNumber, "bucketNumber is null");
         requireNonNull(effectivePredicate, "tupleDomain is null");
+        requireNonNull(columnCoercions, "columnCoercions is null");
+        requireNonNull(bucketConversion, "bucketConversion is null");
 
-        this.clientId = clientId;
         this.database = database;
         this.table = table;
         this.partitionName = partitionName;
         this.path = path;
         this.start = start;
         this.length = length;
+        this.fileSize = fileSize;
         this.schema = schema;
         this.partitionKeys = ImmutableList.copyOf(partitionKeys);
         this.addresses = ImmutableList.copyOf(addresses);
         this.bucketNumber = bucketNumber;
         this.forceLocalScheduling = forceLocalScheduling;
         this.effectivePredicate = effectivePredicate;
-    }
-
-    @JsonProperty
-    public String getClientId()
-    {
-        return clientId;
+        this.columnCoercions = columnCoercions;
+        this.bucketConversion = bucketConversion;
     }
 
     @JsonProperty
@@ -133,6 +138,12 @@ public class HiveSplit
     }
 
     @JsonProperty
+    public long getFileSize()
+    {
+        return fileSize;
+    }
+
+    @JsonProperty
     public Properties getSchema()
     {
         return schema;
@@ -169,6 +180,18 @@ public class HiveSplit
         return forceLocalScheduling;
     }
 
+    @JsonProperty
+    public Map<Integer, HiveType> getColumnCoercions()
+    {
+        return columnCoercions;
+    }
+
+    @JsonProperty
+    public Optional<BucketConversion> getBucketConversion()
+    {
+        return bucketConversion;
+    }
+
     @Override
     public boolean isRemotelyAccessible()
     {
@@ -182,12 +205,12 @@ public class HiveSplit
                 .put("path", path)
                 .put("start", start)
                 .put("length", length)
+                .put("fileSize", fileSize)
                 .put("hosts", addresses)
                 .put("database", database)
                 .put("table", table)
                 .put("forceLocalScheduling", forceLocalScheduling)
                 .put("partitionName", partitionName)
-                .put("effectivePredicate", effectivePredicate)
                 .build();
     }
 
@@ -198,7 +221,66 @@ public class HiveSplit
                 .addValue(path)
                 .addValue(start)
                 .addValue(length)
+                .addValue(fileSize)
                 .addValue(effectivePredicate)
                 .toString();
+    }
+
+    public static class BucketConversion
+    {
+        private final int tableBucketCount;
+        private final int partitionBucketCount;
+        private final List<HiveColumnHandle> bucketColumnNames;
+        // bucketNumber is needed, but can be found in bucketNumber field of HiveSplit.
+
+        @JsonCreator
+        public BucketConversion(
+                @JsonProperty("tableBucketCount") int tableBucketCount,
+                @JsonProperty("partitionBucketCount") int partitionBucketCount,
+                @JsonProperty("bucketColumnHandles") List<HiveColumnHandle> bucketColumnHandles)
+        {
+            this.tableBucketCount = tableBucketCount;
+            this.partitionBucketCount = partitionBucketCount;
+            this.bucketColumnNames = requireNonNull(bucketColumnHandles, "bucketColumnHandles is null");
+        }
+
+        @JsonProperty
+        public int getTableBucketCount()
+        {
+            return tableBucketCount;
+        }
+
+        @JsonProperty
+        public int getPartitionBucketCount()
+        {
+            return partitionBucketCount;
+        }
+
+        @JsonProperty
+        public List<HiveColumnHandle> getBucketColumnHandles()
+        {
+            return bucketColumnNames;
+        }
+
+        @Override
+        public boolean equals(Object o)
+        {
+            if (this == o) {
+                return true;
+            }
+            if (o == null || getClass() != o.getClass()) {
+                return false;
+            }
+            BucketConversion that = (BucketConversion) o;
+            return tableBucketCount == that.tableBucketCount &&
+                    partitionBucketCount == that.partitionBucketCount &&
+                    Objects.equals(bucketColumnNames, that.bucketColumnNames);
+        }
+
+        @Override
+        public int hashCode()
+        {
+            return Objects.hash(tableBucketCount, partitionBucketCount, bucketColumnNames);
+        }
     }
 }

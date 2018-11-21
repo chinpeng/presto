@@ -14,9 +14,9 @@
 package com.facebook.presto.metadata;
 
 import com.facebook.presto.client.NodeVersion;
-import com.facebook.presto.server.NoOpFailureDetector;
+import com.facebook.presto.failureDetector.NoOpFailureDetector;
+import com.facebook.presto.server.InternalCommunicationConfig;
 import com.facebook.presto.spi.Node;
-import com.facebook.presto.spi.NodeManager;
 import com.google.common.collect.ArrayListMultimap;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
@@ -50,6 +50,7 @@ import static org.testng.Assert.assertNotSame;
 public class TestDiscoveryNodeManager
 {
     private final NodeInfo nodeInfo = new NodeInfo("test");
+    private final InternalCommunicationConfig internalCommunicationConfig = new InternalCommunicationConfig();
     private NodeVersion expectedVersion;
     private List<PrestoNode> activeNodes;
     private List<PrestoNode> inactiveNodes;
@@ -63,16 +64,15 @@ public class TestDiscoveryNodeManager
         testHttpClient = new TestingHttpClient(input -> new TestingResponse(OK, ArrayListMultimap.create(), ACTIVE.name().getBytes()));
 
         expectedVersion = new NodeVersion("1");
-        coordinator = new PrestoNode(UUID.randomUUID().toString(), URI.create("https://192.0.2.8"), expectedVersion);
+        coordinator = new PrestoNode(UUID.randomUUID().toString(), URI.create("https://192.0.2.8"), expectedVersion, false);
         activeNodes = ImmutableList.of(
-                new PrestoNode(nodeInfo.getNodeId(), URI.create("http://192.0.1.1"), expectedVersion),
-                new PrestoNode(UUID.randomUUID().toString(), URI.create("http://192.0.2.1:8080"), expectedVersion),
-                new PrestoNode(UUID.randomUUID().toString(), URI.create("http://192.0.2.3"), expectedVersion),
+                new PrestoNode(nodeInfo.getNodeId(), URI.create("http://192.0.1.1"), expectedVersion, false),
+                new PrestoNode(UUID.randomUUID().toString(), URI.create("http://192.0.2.1:8080"), expectedVersion, false),
+                new PrestoNode(UUID.randomUUID().toString(), URI.create("http://192.0.2.3"), expectedVersion, false),
                 coordinator);
         inactiveNodes = ImmutableList.of(
-                new PrestoNode(UUID.randomUUID().toString(), URI.create("https://192.0.3.9"), NodeVersion.UNKNOWN),
-                new PrestoNode(UUID.randomUUID().toString(), URI.create("https://192.0.4.9"), new NodeVersion("2"))
-        );
+                new PrestoNode(UUID.randomUUID().toString(), URI.create("https://192.0.3.9"), NodeVersion.UNKNOWN, false),
+                new PrestoNode(UUID.randomUUID().toString(), URI.create("https://192.0.4.9"), new NodeVersion("2"), false));
 
         List<ServiceDescriptor> descriptors = new ArrayList<>();
         for (PrestoNode node : Iterables.concat(activeNodes, inactiveNodes)) {
@@ -89,9 +89,8 @@ public class TestDiscoveryNodeManager
 
     @Test
     public void testGetAllNodes()
-            throws Exception
     {
-        DiscoveryNodeManager manager = new DiscoveryNodeManager(selector, nodeInfo, new NoOpFailureDetector(), expectedVersion, testHttpClient);
+        DiscoveryNodeManager manager = new DiscoveryNodeManager(selector, nodeInfo, new NoOpFailureDetector(), expectedVersion, testHttpClient, internalCommunicationConfig);
         AllNodes allNodes = manager.getAllNodes();
 
         Set<Node> activeNodes = allNodes.getActiveNodes();
@@ -126,16 +125,15 @@ public class TestDiscoveryNodeManager
                 .setEnvironment("test")
                 .setNodeId(expected.getNodeIdentifier()));
 
-        DiscoveryNodeManager manager = new DiscoveryNodeManager(selector, nodeInfo, new NoOpFailureDetector(), expectedVersion, testHttpClient);
+        DiscoveryNodeManager manager = new DiscoveryNodeManager(selector, nodeInfo, new NoOpFailureDetector(), expectedVersion, testHttpClient, internalCommunicationConfig);
 
         assertEquals(manager.getCurrentNode(), expected);
     }
 
     @Test
     public void testGetCoordinators()
-            throws Exception
     {
-        NodeManager manager = new DiscoveryNodeManager(selector, nodeInfo, new NoOpFailureDetector(), expectedVersion, testHttpClient);
+        InternalNodeManager manager = new DiscoveryNodeManager(selector, nodeInfo, new NoOpFailureDetector(), expectedVersion, testHttpClient, internalCommunicationConfig);
         assertEquals(manager.getCoordinators(), ImmutableSet.of(coordinator));
     }
 
@@ -143,6 +141,6 @@ public class TestDiscoveryNodeManager
     @Test(expectedExceptions = IllegalStateException.class, expectedExceptionsMessageRegExp = ".* current node not returned .*")
     public void testGetCurrentNodeRequired()
     {
-        new DiscoveryNodeManager(selector, new NodeInfo("test"), new NoOpFailureDetector(), expectedVersion, testHttpClient);
+        new DiscoveryNodeManager(selector, new NodeInfo("test"), new NoOpFailureDetector(), expectedVersion, testHttpClient, internalCommunicationConfig);
     }
 }

@@ -13,14 +13,15 @@
  */
 package com.facebook.presto.hive;
 
+import com.facebook.presto.hive.s3.S3ConfigurationUpdater;
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableList;
 import com.google.common.net.HostAndPort;
-import com.google.common.primitives.Ints;
-import io.airlift.units.DataSize;
 import io.airlift.units.Duration;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hive.ql.io.orc.OrcFile.OrcTableProperties;
+import org.apache.hadoop.mapreduce.lib.input.LineRecordReader;
 import org.apache.hadoop.mapreduce.lib.output.FileOutputFormat;
 import org.apache.hadoop.net.DNSToSwitchMapping;
 import org.apache.hadoop.net.SocksSocketFactory;
@@ -29,12 +30,23 @@ import parquet.hadoop.ParquetOutputFormat;
 import javax.inject.Inject;
 import javax.net.SocketFactory;
 
-import java.io.File;
 import java.util.List;
 
 import static com.facebook.hive.orc.OrcConf.ConfVars.HIVE_ORC_COMPRESSION;
+import static com.facebook.presto.hive.util.ConfigurationUtils.copy;
 import static com.google.common.base.Preconditions.checkArgument;
+import static java.lang.Math.toIntExact;
 import static java.util.Objects.requireNonNull;
+import static org.apache.hadoop.fs.CommonConfigurationKeys.IPC_PING_INTERVAL_KEY;
+import static org.apache.hadoop.fs.CommonConfigurationKeysPublic.HADOOP_RPC_PROTECTION;
+import static org.apache.hadoop.fs.CommonConfigurationKeysPublic.HADOOP_RPC_SOCKET_FACTORY_CLASS_DEFAULT_KEY;
+import static org.apache.hadoop.fs.CommonConfigurationKeysPublic.HADOOP_SOCKS_SERVER_KEY;
+import static org.apache.hadoop.fs.CommonConfigurationKeysPublic.IPC_CLIENT_CONNECT_MAX_RETRIES_KEY;
+import static org.apache.hadoop.fs.CommonConfigurationKeysPublic.IPC_CLIENT_CONNECT_TIMEOUT_KEY;
+import static org.apache.hadoop.fs.CommonConfigurationKeysPublic.NET_TOPOLOGY_NODE_SWITCH_MAPPING_IMPL_KEY;
+import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_CLIENT_READ_SHORTCIRCUIT_KEY;
+import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_CLIENT_SOCKET_TIMEOUT_KEY;
+import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_DOMAIN_SOCKET_PATH_KEY;
 import static org.apache.hadoop.hive.conf.HiveConf.ConfVars.COMPRESSRESULT;
 import static org.apache.hadoop.hive.conf.HiveConf.ConfVars.HIVE_ORC_DEFAULT_COMPRESS;
 import static org.apache.hadoop.io.SequenceFile.CompressionType.BLOCK;
@@ -47,120 +59,92 @@ public class HdfsConfigurationUpdater
     private final Duration dfsConnectTimeout;
     private final int dfsConnectMaxRetries;
     private final String domainSocketPath;
-    private final String s3AwsAccessKey;
-    private final String s3AwsSecretKey;
-    private final boolean s3UseInstanceCredentials;
-    private final boolean s3SslEnabled;
-    private final boolean s3SseEnabled;
-    private final int s3MaxClientRetries;
-    private final int s3MaxErrorRetries;
-    private final Duration s3MaxBackoffTime;
-    private final Duration s3MaxRetryTime;
-    private final Duration s3ConnectTimeout;
-    private final Duration s3SocketTimeout;
-    private final int s3MaxConnections;
-    private final DataSize s3MultipartMinFileSize;
-    private final DataSize s3MultipartMinPartSize;
-    private final File s3StagingDirectory;
-    private final List<String> resourcePaths;
-    private final boolean pinS3ClientToCurrentRegion;
+    private final Configuration resourcesConfiguration;
     private final HiveCompressionCodec compressionCodec;
+    private final int fileSystemMaxCacheSize;
+    private final S3ConfigurationUpdater s3ConfigurationUpdater;
+    private final boolean isHdfsWireEncryptionEnabled;
+    private int textMaxLineLength;
+
+    @VisibleForTesting
+    public HdfsConfigurationUpdater(HiveClientConfig config)
+    {
+        this(config, ignored -> {});
+    }
 
     @Inject
-    public HdfsConfigurationUpdater(HiveClientConfig hiveClientConfig)
+    public HdfsConfigurationUpdater(HiveClientConfig config, S3ConfigurationUpdater s3ConfigurationUpdater)
     {
-        requireNonNull(hiveClientConfig, "hiveClientConfig is null");
-        checkArgument(hiveClientConfig.getDfsTimeout().toMillis() >= 1, "dfsTimeout must be at least 1 ms");
+        requireNonNull(config, "config is null");
+        checkArgument(config.getDfsTimeout().toMillis() >= 1, "dfsTimeout must be at least 1 ms");
+        checkArgument(toIntExact(config.getTextMaxLineLength().toBytes()) >= 1, "textMaxLineLength must be at least 1 byte");
 
-        this.socksProxy = hiveClientConfig.getMetastoreSocksProxy();
-        this.ipcPingInterval = hiveClientConfig.getIpcPingInterval();
-        this.dfsTimeout = hiveClientConfig.getDfsTimeout();
-        this.dfsConnectTimeout = hiveClientConfig.getDfsConnectTimeout();
-        this.dfsConnectMaxRetries = hiveClientConfig.getDfsConnectMaxRetries();
-        this.domainSocketPath = hiveClientConfig.getDomainSocketPath();
-        this.s3AwsAccessKey = hiveClientConfig.getS3AwsAccessKey();
-        this.s3AwsSecretKey = hiveClientConfig.getS3AwsSecretKey();
-        this.s3UseInstanceCredentials = hiveClientConfig.isS3UseInstanceCredentials();
-        this.s3SslEnabled = hiveClientConfig.isS3SslEnabled();
-        this.s3SseEnabled = hiveClientConfig.isS3SseEnabled();
-        this.s3MaxClientRetries = hiveClientConfig.getS3MaxClientRetries();
-        this.s3MaxErrorRetries = hiveClientConfig.getS3MaxErrorRetries();
-        this.s3MaxBackoffTime = hiveClientConfig.getS3MaxBackoffTime();
-        this.s3MaxRetryTime = hiveClientConfig.getS3MaxRetryTime();
-        this.s3ConnectTimeout = hiveClientConfig.getS3ConnectTimeout();
-        this.s3SocketTimeout = hiveClientConfig.getS3SocketTimeout();
-        this.s3MaxConnections = hiveClientConfig.getS3MaxConnections();
-        this.s3MultipartMinFileSize = hiveClientConfig.getS3MultipartMinFileSize();
-        this.s3MultipartMinPartSize = hiveClientConfig.getS3MultipartMinPartSize();
-        this.s3StagingDirectory = hiveClientConfig.getS3StagingDirectory();
-        this.resourcePaths = hiveClientConfig.getResourceConfigFiles();
-        this.pinS3ClientToCurrentRegion = hiveClientConfig.isPinS3ClientToCurrentRegion();
-        this.compressionCodec = hiveClientConfig.getHiveCompressionCodec();
+        this.socksProxy = config.getMetastoreSocksProxy();
+        this.ipcPingInterval = config.getIpcPingInterval();
+        this.dfsTimeout = config.getDfsTimeout();
+        this.dfsConnectTimeout = config.getDfsConnectTimeout();
+        this.dfsConnectMaxRetries = config.getDfsConnectMaxRetries();
+        this.domainSocketPath = config.getDomainSocketPath();
+        this.resourcesConfiguration = readConfiguration(config.getResourceConfigFiles());
+        this.compressionCodec = config.getHiveCompressionCodec();
+        this.fileSystemMaxCacheSize = config.getFileSystemMaxCacheSize();
+        this.isHdfsWireEncryptionEnabled = config.isHdfsWireEncryptionEnabled();
+        this.textMaxLineLength = toIntExact(config.getTextMaxLineLength().toBytes());
+
+        this.s3ConfigurationUpdater = requireNonNull(s3ConfigurationUpdater, "s3ConfigurationUpdater is null");
+    }
+
+    private static Configuration readConfiguration(List<String> resourcePaths)
+    {
+        Configuration result = new Configuration(false);
+
+        for (String resourcePath : resourcePaths) {
+            Configuration resourceProperties = new Configuration(false);
+            resourceProperties.addResource(new Path(resourcePath));
+            copy(resourceProperties, result);
+        }
+
+        return result;
     }
 
     public void updateConfiguration(Configuration config)
     {
-        if (resourcePaths != null) {
-            for (String resourcePath : resourcePaths) {
-                config.addResource(new Path(resourcePath));
-            }
-        }
+        copy(resourcesConfiguration, config);
 
         // this is to prevent dfs client from doing reverse DNS lookups to determine whether nodes are rack local
-        config.setClass("topology.node.switch.mapping.impl", NoOpDNSToSwitchMapping.class, DNSToSwitchMapping.class);
+        config.setClass(NET_TOPOLOGY_NODE_SWITCH_MAPPING_IMPL_KEY, NoOpDNSToSwitchMapping.class, DNSToSwitchMapping.class);
 
         if (socksProxy != null) {
-            config.setClass("hadoop.rpc.socket.factory.class.default", SocksSocketFactory.class, SocketFactory.class);
-            config.set("hadoop.socks.server", socksProxy.toString());
+            config.setClass(HADOOP_RPC_SOCKET_FACTORY_CLASS_DEFAULT_KEY, SocksSocketFactory.class, SocketFactory.class);
+            config.set(HADOOP_SOCKS_SERVER_KEY, socksProxy.toString());
         }
 
         if (domainSocketPath != null) {
-            config.setStrings("dfs.domain.socket.path", domainSocketPath);
+            config.setStrings(DFS_DOMAIN_SOCKET_PATH_KEY, domainSocketPath);
         }
 
         // only enable short circuit reads if domain socket path is properly configured
-        if (!config.get("dfs.domain.socket.path", "").trim().isEmpty()) {
-            config.setBooleanIfUnset("dfs.client.read.shortcircuit", true);
+        if (!config.get(DFS_DOMAIN_SOCKET_PATH_KEY, "").trim().isEmpty()) {
+            config.setBooleanIfUnset(DFS_CLIENT_READ_SHORTCIRCUIT_KEY, true);
         }
 
-        config.setInt("dfs.socket.timeout", Ints.checkedCast(dfsTimeout.toMillis()));
-        config.setInt("ipc.ping.interval", Ints.checkedCast(ipcPingInterval.toMillis()));
-        config.setInt("ipc.client.connect.timeout", Ints.checkedCast(dfsConnectTimeout.toMillis()));
-        config.setInt("ipc.client.connect.max.retries", dfsConnectMaxRetries);
+        config.setInt(DFS_CLIENT_SOCKET_TIMEOUT_KEY, toIntExact(dfsTimeout.toMillis()));
+        config.setInt(IPC_PING_INTERVAL_KEY, toIntExact(ipcPingInterval.toMillis()));
+        config.setInt(IPC_CLIENT_CONNECT_TIMEOUT_KEY, toIntExact(dfsConnectTimeout.toMillis()));
+        config.setInt(IPC_CLIENT_CONNECT_MAX_RETRIES_KEY, dfsConnectMaxRetries);
 
-        // re-map filesystem schemes to match Amazon Elastic MapReduce
-        config.set("fs.s3.impl", PrestoS3FileSystem.class.getName());
-        config.set("fs.s3a.impl", PrestoS3FileSystem.class.getName());
-        config.set("fs.s3n.impl", PrestoS3FileSystem.class.getName());
-        config.set("fs.s3bfs.impl", "org.apache.hadoop.fs.s3.S3FileSystem");
+        if (isHdfsWireEncryptionEnabled) {
+            config.set(HADOOP_RPC_PROTECTION, "privacy");
+            config.setBoolean("dfs.encrypt.data.transfer", true);
+        }
 
-        // set AWS credentials for S3
-        if (s3AwsAccessKey != null) {
-            config.set(PrestoS3FileSystem.S3_ACCESS_KEY, s3AwsAccessKey);
-            config.set("fs.s3bfs.awsAccessKeyId", s3AwsAccessKey);
-        }
-        if (s3AwsSecretKey != null) {
-            config.set(PrestoS3FileSystem.S3_SECRET_KEY, s3AwsSecretKey);
-            config.set("fs.s3bfs.awsSecretAccessKey", s3AwsSecretKey);
-        }
+        config.setInt("fs.cache.max-size", fileSystemMaxCacheSize);
+
+        config.setInt(LineRecordReader.MAX_LINE_LENGTH, textMaxLineLength);
 
         configureCompression(config, compressionCodec);
 
-        // set config for S3
-        config.setBoolean(PrestoS3FileSystem.S3_USE_INSTANCE_CREDENTIALS, s3UseInstanceCredentials);
-        config.setBoolean(PrestoS3FileSystem.S3_SSL_ENABLED, s3SslEnabled);
-        config.setBoolean(PrestoS3FileSystem.S3_SSE_ENABLED, s3SseEnabled);
-        config.setInt(PrestoS3FileSystem.S3_MAX_CLIENT_RETRIES, s3MaxClientRetries);
-        config.setInt(PrestoS3FileSystem.S3_MAX_ERROR_RETRIES, s3MaxErrorRetries);
-        config.set(PrestoS3FileSystem.S3_MAX_BACKOFF_TIME, s3MaxBackoffTime.toString());
-        config.set(PrestoS3FileSystem.S3_MAX_RETRY_TIME, s3MaxRetryTime.toString());
-        config.set(PrestoS3FileSystem.S3_CONNECT_TIMEOUT, s3ConnectTimeout.toString());
-        config.set(PrestoS3FileSystem.S3_SOCKET_TIMEOUT, s3SocketTimeout.toString());
-        config.set(PrestoS3FileSystem.S3_STAGING_DIRECTORY, s3StagingDirectory.toString());
-        config.setInt(PrestoS3FileSystem.S3_MAX_CONNECTIONS, s3MaxConnections);
-        config.setLong(PrestoS3FileSystem.S3_MULTIPART_MIN_FILE_SIZE, s3MultipartMinFileSize.toBytes());
-        config.setLong(PrestoS3FileSystem.S3_MULTIPART_MIN_PART_SIZE, s3MultipartMinPartSize.toBytes());
-        config.setBoolean(PrestoS3FileSystem.S3_PIN_CLIENT_TO_CURRENT_REGION, pinS3ClientToCurrentRegion);
+        s3ConfigurationUpdater.updateConfiguration(config);
     }
 
     public static void configureCompression(Configuration config, HiveCompressionCodec compressionCodec)
@@ -174,7 +158,7 @@ public class HdfsConfigurationUpdater
         config.set(HIVE_ORC_COMPRESSION.varname, compressionCodec.getOrcCompressionKind().name());
         // For ORC
         config.set(OrcTableProperties.COMPRESSION.getPropName(), compressionCodec.getOrcCompressionKind().name());
-        // For RCFile
+        // For RCFile and Text
         if (compressionCodec.getCodec().isPresent()) {
             config.set("mapred.output.compression.codec", compressionCodec.getCodec().get().getName());
             config.set(FileOutputFormat.COMPRESS_CODEC, compressionCodec.getCodec().get().getName());
@@ -201,6 +185,12 @@ public class HdfsConfigurationUpdater
 
         @Override
         public void reloadCachedMappings()
+        {
+            // no-op
+        }
+
+        @Override
+        public void reloadCachedMappings(List<String> names)
         {
             // no-op
         }

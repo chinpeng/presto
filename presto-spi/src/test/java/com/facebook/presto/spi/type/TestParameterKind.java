@@ -11,7 +11,6 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 package com.facebook.presto.spi.type;
 
 import io.airlift.json.JsonCodec;
@@ -33,7 +32,6 @@ public class TestParameterKind
 
     @Test
     public void testSerialize()
-            throws Exception
     {
         assertEquals(PARAMETER_KIND_CODEC.toJson(ParameterKind.TYPE), "\"TYPE_SIGNATURE\"");
         assertEquals(PARAMETER_KIND_CODEC.toJson(ParameterKind.NAMED_TYPE), "\"NAMED_TYPE_SIGNATURE\"");
@@ -43,7 +41,6 @@ public class TestParameterKind
 
     @Test
     public void testDeserializeFromOldFormat()
-            throws Exception
     {
         assertEquals(PARAMETER_KIND_CODEC.fromJson("\"TYPE_SIGNATURE\""), ParameterKind.TYPE);
         assertEquals(PARAMETER_KIND_CODEC.fromJson("\"NAMED_TYPE_SIGNATURE\""), ParameterKind.NAMED_TYPE);
@@ -53,7 +50,6 @@ public class TestParameterKind
 
     @Test
     public void testDeserializeFromNewFormat()
-            throws Exception
     {
         assertEquals(PARAMETER_KIND_CODEC.fromJson("\"TYPE\""), ParameterKind.TYPE);
         assertEquals(PARAMETER_KIND_CODEC.fromJson("\"NAMED_TYPE\""), ParameterKind.NAMED_TYPE);

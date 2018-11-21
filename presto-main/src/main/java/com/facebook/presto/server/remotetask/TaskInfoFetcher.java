@@ -14,6 +14,7 @@
 package com.facebook.presto.server.remotetask;
 
 import com.facebook.presto.execution.StateMachine;
+import com.facebook.presto.execution.StateMachine.StateChangeListener;
 import com.facebook.presto.execution.TaskId;
 import com.facebook.presto.execution.TaskInfo;
 import com.facebook.presto.execution.TaskStatus;
@@ -25,18 +26,17 @@ import io.airlift.http.client.HttpClient;
 import io.airlift.http.client.HttpUriBuilder;
 import io.airlift.http.client.Request;
 import io.airlift.json.JsonCodec;
-import io.airlift.log.Logger;
 import io.airlift.units.Duration;
 
 import javax.annotation.concurrent.GuardedBy;
 
 import java.net.URI;
+import java.util.Optional;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 
 import static com.google.common.net.HttpHeaders.CONTENT_TYPE;
@@ -51,11 +51,10 @@ import static java.util.concurrent.TimeUnit.MILLISECONDS;
 public class TaskInfoFetcher
         implements SimpleHttpResponseCallback<TaskInfo>
 {
-    private static final Logger log = Logger.get(TaskInfoFetcher.class);
-
     private final TaskId taskId;
     private final Consumer<Throwable> onFail;
     private final StateMachine<TaskInfo> taskInfo;
+    private final StateMachine<Optional<TaskInfo>> finalTaskInfo;
     private final JsonCodec<TaskInfo> taskInfoCodec;
 
     private final long updateIntervalMillis;
@@ -70,12 +69,6 @@ public class TaskInfoFetcher
 
     @GuardedBy("this")
     private final AtomicLong currentRequestStartNanos = new AtomicLong();
-
-    @GuardedBy("this")
-    private final AtomicReference<TaskStatus> taskStatusDone = new AtomicReference();
-
-    @GuardedBy("this")
-    private final AtomicBoolean lastRequest = new AtomicBoolean();
 
     private final RemoteTaskStats stats;
 
@@ -94,7 +87,7 @@ public class TaskInfoFetcher
             HttpClient httpClient,
             Duration updateInterval,
             JsonCodec<TaskInfo> taskInfoCodec,
-            Duration minErrorDuration,
+            Duration maxErrorDuration,
             boolean summarizeTaskInfo,
             Executor executor,
             ScheduledExecutorService updateScheduledExecutor,
@@ -102,17 +95,17 @@ public class TaskInfoFetcher
             RemoteTaskStats stats)
     {
         requireNonNull(initialTask, "initialTask is null");
-        requireNonNull(minErrorDuration, "minErrorDuration is null");
         requireNonNull(errorScheduledExecutor, "errorScheduledExecutor is null");
 
         this.taskId = initialTask.getTaskStatus().getTaskId();
         this.onFail = requireNonNull(onFail, "onFail is null");
         this.taskInfo = new StateMachine<>("task " + taskId, executor, initialTask);
+        this.finalTaskInfo = new StateMachine<>("task-" + taskId, executor, Optional.empty());
         this.taskInfoCodec = requireNonNull(taskInfoCodec, "taskInfoCodec is null");
 
         this.updateIntervalMillis = requireNonNull(updateInterval, "updateInterval is null").toMillis();
         this.updateScheduledExecutor = requireNonNull(updateScheduledExecutor, "updateScheduledExecutor is null");
-        this.errorTracker = new RequestErrorTracker(taskId, initialTask.getTaskStatus().getSelf(), minErrorDuration, errorScheduledExecutor, "getting info for task");
+        this.errorTracker = new RequestErrorTracker(taskId, initialTask.getTaskStatus().getSelf(), maxErrorDuration, errorScheduledExecutor, "getting info for task");
 
         this.summarizeTaskInfo = summarizeTaskInfo;
 
@@ -136,24 +129,6 @@ public class TaskInfoFetcher
         scheduleUpdate();
     }
 
-    public synchronized void abort(TaskStatus taskStatus)
-    {
-        updateTaskInfo(taskInfo.get().withTaskStatus(taskStatus));
-        // For aborted tasks we do not care about the final task info, so stop the info fetcher
-        stop();
-    }
-
-    public synchronized void taskStatusDone(TaskStatus taskStatus)
-    {
-        if (running && !isDone(getTaskInfo())) {
-            // try to get the last task status from the remote task
-            taskStatusDone.set(taskStatus);
-        }
-        else {
-            getTaskInfo().withTaskStatus(taskStatus);
-        }
-    }
-
     private synchronized void stop()
     {
         running = false;
@@ -164,6 +139,18 @@ public class TaskInfoFetcher
         if (scheduledFuture != null) {
             scheduledFuture.cancel(true);
         }
+    }
+
+    public void addFinalTaskInfoListener(StateChangeListener<TaskInfo> stateChangeListener)
+    {
+        AtomicBoolean done = new AtomicBoolean();
+        StateChangeListener<Optional<TaskInfo>> fireOnceStateChangeListener = finalTaskInfo -> {
+            if (finalTaskInfo.isPresent() && done.compareAndSet(false, true)) {
+                stateChangeListener.stateChanged(finalTaskInfo.get());
+            }
+        };
+        finalTaskInfo.addStateChangeListener(fireOnceStateChangeListener);
+        fireOnceStateChangeListener.stateChanged(finalTaskInfo.get());
     }
 
     private synchronized void scheduleUpdate()
@@ -200,10 +187,6 @@ public class TaskInfoFetcher
             return;
         }
 
-        if (taskStatusDone.get() != null) {
-            lastRequest.set(true);
-        }
-
         // if throttled due to error, asynchronously wait for timeout and try again
         ListenableFuture<?> errorRateLimit = errorTracker.acquireRequestPermit();
         if (!errorRateLimit.isDone()) {
@@ -212,12 +195,7 @@ public class TaskInfoFetcher
         }
 
         HttpUriBuilder httpUriBuilder = uriBuilderFrom(taskStatus.getSelf());
-        // if this is the last request, don't summarize, get the complete taskInfo
-        URI uri = lastRequest.get() ? httpUriBuilder.build() : httpUriBuilder.addParameter("summarize").build();
-
-        if (summarizeTaskInfo) {
-            httpUriBuilder.addParameter("summarize");
-        }
+        URI uri = summarizeTaskInfo ? httpUriBuilder.addParameter("summarize").build() : httpUriBuilder.build();
         Request request = prepareGet()
                 .setUri(uri)
                 .setHeader(CONTENT_TYPE, JSON_UTF_8.toString())
@@ -231,7 +209,7 @@ public class TaskInfoFetcher
 
     synchronized void updateTaskInfo(TaskInfo newValue)
     {
-        taskInfo.setIf(newValue, oldValue -> {
+        boolean updated = taskInfo.setIf(newValue, oldValue -> {
             TaskStatus oldTaskStatus = oldValue.getTaskStatus();
             TaskStatus newTaskStatus = newValue.getTaskStatus();
             if (oldTaskStatus.getState().isDone()) {
@@ -241,6 +219,11 @@ public class TaskInfoFetcher
             // don't update to an older version (same version is ok)
             return newTaskStatus.getVersion() >= oldTaskStatus.getVersion();
         });
+
+        if (updated && newValue.getTaskStatus().getState().isDone()) {
+            finalTaskInfo.compareAndSet(Optional.empty(), Optional.of(newValue));
+            stop();
+        }
     }
 
     @Override
@@ -248,23 +231,14 @@ public class TaskInfoFetcher
     {
         try (SetThreadName ignored = new SetThreadName("TaskInfoFetcher-%s", taskId)) {
             lastUpdateNanos.set(System.nanoTime());
-            updateStats(currentRequestStartNanos.get());
 
+            long startNanos;
+            synchronized (this) {
+                startNanos = this.currentRequestStartNanos.get();
+            }
+            updateStats(startNanos);
             errorTracker.requestSucceeded();
             updateTaskInfo(newValue);
-
-            // if taskStatus is done, and the newValue that we got is also done,
-            // we have the final task info so we can stop
-            if (lastRequest.get() && !newValue.getTaskStatus().getState().isDone()) {
-                log.error("%s taskStatus done but taskInfo is not", taskId);
-
-                // Since the task is already done, update the task status
-                updateTaskInfo(taskInfo.get().withTaskStatus(taskStatusDone.get()));
-            }
-
-            if (lastRequest.get()) {
-                stop();
-            }
         }
     }
 
@@ -273,7 +247,6 @@ public class TaskInfoFetcher
     {
         try (SetThreadName ignored = new SetThreadName("TaskInfoFetcher-%s", taskId)) {
             lastUpdateNanos.set(System.nanoTime());
-            updateStats(currentRequestStartNanos.get());
 
             try {
                 // if task not already done, record error
@@ -282,11 +255,6 @@ public class TaskInfoFetcher
                 }
             }
             catch (Error e) {
-                // if task status is already done, ignore this failure, update the task status and stop fetching
-                if (taskStatusDone.get() != null) {
-                    updateTaskInfo(taskInfo.get().withTaskStatus(taskStatusDone.get()));
-                    stop();
-                }
                 onFail.accept(e);
                 throw e;
             }
@@ -300,12 +268,6 @@ public class TaskInfoFetcher
     public void fatal(Throwable cause)
     {
         try (SetThreadName ignored = new SetThreadName("TaskInfoFetcher-%s", taskId)) {
-            // if task status is already done, ignore this failure, update the task status and stop fetching
-            if (taskStatusDone.get() != null) {
-                updateTaskInfo(taskInfo.get().withTaskStatus(taskStatusDone.get()));
-                stop();
-            }
-            updateStats(currentRequestStartNanos.get());
             onFail.accept(cause);
         }
     }

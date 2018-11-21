@@ -33,12 +33,11 @@ import static org.testng.Assert.assertTrue;
 @Test(singleThreaded = true)
 public class TestInformationSchemaTableHandle
 {
-    private static final Map<String, Object> SCHEMA_AS_MAP = ImmutableMap.<String, Object>of(
+    private static final Map<String, Object> SCHEMA_AS_MAP = ImmutableMap.of(
             "@type", "$info_schema",
             "catalogName", "information_schema_catalog",
             "schemaName", "information_schema_schema",
-            "tableName", "information_schema_table"
-    );
+            "tableName", "information_schema_table");
 
     private ObjectMapper objectMapper;
 

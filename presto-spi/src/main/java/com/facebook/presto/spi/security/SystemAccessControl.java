@@ -13,25 +13,36 @@
  */
 package com.facebook.presto.spi.security;
 
+import com.facebook.presto.spi.CatalogSchemaName;
 import com.facebook.presto.spi.CatalogSchemaTableName;
+import com.facebook.presto.spi.SchemaTableName;
 
 import java.security.Principal;
+import java.util.Collections;
+import java.util.Optional;
+import java.util.Set;
 
 import static com.facebook.presto.spi.security.AccessDeniedException.denyAddColumn;
+import static com.facebook.presto.spi.security.AccessDeniedException.denyCatalogAccess;
+import static com.facebook.presto.spi.security.AccessDeniedException.denyCreateSchema;
 import static com.facebook.presto.spi.security.AccessDeniedException.denyCreateTable;
 import static com.facebook.presto.spi.security.AccessDeniedException.denyCreateView;
 import static com.facebook.presto.spi.security.AccessDeniedException.denyCreateViewWithSelect;
 import static com.facebook.presto.spi.security.AccessDeniedException.denyDeleteTable;
+import static com.facebook.presto.spi.security.AccessDeniedException.denyDropColumn;
+import static com.facebook.presto.spi.security.AccessDeniedException.denyDropSchema;
 import static com.facebook.presto.spi.security.AccessDeniedException.denyDropTable;
 import static com.facebook.presto.spi.security.AccessDeniedException.denyDropView;
 import static com.facebook.presto.spi.security.AccessDeniedException.denyGrantTablePrivilege;
 import static com.facebook.presto.spi.security.AccessDeniedException.denyInsertTable;
 import static com.facebook.presto.spi.security.AccessDeniedException.denyRenameColumn;
+import static com.facebook.presto.spi.security.AccessDeniedException.denyRenameSchema;
 import static com.facebook.presto.spi.security.AccessDeniedException.denyRenameTable;
 import static com.facebook.presto.spi.security.AccessDeniedException.denyRevokeTablePrivilege;
-import static com.facebook.presto.spi.security.AccessDeniedException.denySelectTable;
-import static com.facebook.presto.spi.security.AccessDeniedException.denySelectView;
+import static com.facebook.presto.spi.security.AccessDeniedException.denySelectColumns;
 import static com.facebook.presto.spi.security.AccessDeniedException.denySetCatalogSessionProperty;
+import static com.facebook.presto.spi.security.AccessDeniedException.denyShowSchemas;
+import static com.facebook.presto.spi.security.AccessDeniedException.denyShowTablesMetadata;
 
 public interface SystemAccessControl
 {
@@ -40,7 +51,7 @@ public interface SystemAccessControl
      *
      * @throws AccessDeniedException if not allowed
      */
-    void checkCanSetUser(Principal principal, String userName);
+    void checkCanSetUser(Optional<Principal> principal, String userName);
 
     /**
      * Check if identity is allowed to set the specified system property.
@@ -48,6 +59,76 @@ public interface SystemAccessControl
      * @throws AccessDeniedException if not allowed
      */
     void checkCanSetSystemSessionProperty(Identity identity, String propertyName);
+
+    /**
+     * Check if identity is allowed to access the specified catalog
+     *
+     * @throws com.facebook.presto.spi.security.AccessDeniedException if not allowed
+     */
+    default void checkCanAccessCatalog(Identity identity, String catalogName)
+    {
+        denyCatalogAccess(catalogName);
+    }
+
+    /**
+     * Filter the list of catalogs to those visible to the identity.
+     */
+    default Set<String> filterCatalogs(Identity identity, Set<String> catalogs)
+    {
+        return Collections.emptySet();
+    }
+
+    /**
+     * Check if identity is allowed to create the specified schema in a catalog.
+     *
+     * @throws com.facebook.presto.spi.security.AccessDeniedException if not allowed
+     */
+    default void checkCanCreateSchema(Identity identity, CatalogSchemaName schema)
+    {
+        denyCreateSchema(schema.toString());
+    }
+
+    /**
+     * Check if identity is allowed to drop the specified schema in a catalog.
+     *
+     * @throws com.facebook.presto.spi.security.AccessDeniedException if not allowed
+     */
+    default void checkCanDropSchema(Identity identity, CatalogSchemaName schema)
+    {
+        denyDropSchema(schema.toString());
+    }
+
+    /**
+     * Check if identity is allowed to rename the specified schema in a catalog.
+     *
+     * @throws com.facebook.presto.spi.security.AccessDeniedException if not allowed
+     */
+    default void checkCanRenameSchema(Identity identity, CatalogSchemaName schema, String newSchemaName)
+    {
+        denyRenameSchema(schema.toString(), newSchemaName);
+    }
+
+    /**
+     * Check if identity is allowed to execute SHOW SCHEMAS in a catalog.
+     * <p>
+     * NOTE: This method is only present to give users an error message when listing is not allowed.
+     * The {@link #filterSchemas} method must filter all results for unauthorized users,
+     * since there are multiple ways to list schemas.
+     *
+     * @throws com.facebook.presto.spi.security.AccessDeniedException if not allowed
+     */
+    default void checkCanShowSchemas(Identity identity, String catalogName)
+    {
+        denyShowSchemas();
+    }
+
+    /**
+     * Filter the list of schemas in a catalog to those visible to the identity.
+     */
+    default Set<String> filterSchemas(Identity identity, String catalogName, Set<String> schemaNames)
+    {
+        return Collections.emptySet();
+    }
 
     /**
      * Check if identity is allowed to create the specified table in a catalog.
@@ -80,6 +161,28 @@ public interface SystemAccessControl
     }
 
     /**
+     * Check if identity is allowed to show metadata of tables by executing SHOW TABLES, SHOW GRANTS etc. in a catalog.
+     * <p>
+     * NOTE: This method is only present to give users an error message when listing is not allowed.
+     * The {@link #filterTables} method must filter all results for unauthorized users,
+     * since there are multiple ways to list tables.
+     *
+     * @throws com.facebook.presto.spi.security.AccessDeniedException if not allowed
+     */
+    default void checkCanShowTablesMetadata(Identity identity, CatalogSchemaName schema)
+    {
+        denyShowTablesMetadata(schema.toString());
+    }
+
+    /**
+     * Filter the list of tables and views to those visible to the identity.
+     */
+    default Set<SchemaTableName> filterTables(Identity identity, String catalogName, Set<SchemaTableName> tableNames)
+    {
+        return Collections.emptySet();
+    }
+
+    /**
      * Check if identity is allowed to add columns to the specified table in a catalog.
      *
      * @throws com.facebook.presto.spi.security.AccessDeniedException if not allowed
@@ -87,6 +190,16 @@ public interface SystemAccessControl
     default void checkCanAddColumn(Identity identity, CatalogSchemaTableName table)
     {
         denyAddColumn(table.toString());
+    }
+
+    /**
+     * Check if identity is allowed to drop columns from the specified table in a catalog.
+     *
+     * @throws com.facebook.presto.spi.security.AccessDeniedException if not allowed
+     */
+    default void checkCanDropColumn(Identity identity, CatalogSchemaTableName table)
+    {
+        denyDropColumn(table.toString());
     }
 
     /**
@@ -100,13 +213,13 @@ public interface SystemAccessControl
     }
 
     /**
-     * Check if identity is allowed to select from the specified table in a catalog.
+     * Check if identity is allowed to select from the specified columns in a relation.  The column set can be empty.
      *
      * @throws com.facebook.presto.spi.security.AccessDeniedException if not allowed
      */
-    default void checkCanSelectFromTable(Identity identity, CatalogSchemaTableName table)
+    default void checkCanSelectFromColumns(Identity identity, CatalogSchemaTableName table, Set<String> columns)
     {
-        denySelectTable(table.toString());
+        denySelectColumns(table.toString(), columns);
     }
 
     /**
@@ -150,33 +263,13 @@ public interface SystemAccessControl
     }
 
     /**
-     * Check if identity is allowed to select from the specified view in a catalog.
+     * Check if identity is allowed to create a view that selects from the specified columns in a relation.
      *
      * @throws com.facebook.presto.spi.security.AccessDeniedException if not allowed
      */
-    default void checkCanSelectFromView(Identity identity, CatalogSchemaTableName view)
+    default void checkCanCreateViewWithSelectFromColumns(Identity identity, CatalogSchemaTableName table, Set<String> columns)
     {
-        denySelectView(view.toString());
-    }
-
-    /**
-     * Check if identity is allowed to create a view that selects from the specified table in a catalog.
-     *
-     * @throws com.facebook.presto.spi.security.AccessDeniedException if not allowed
-     */
-    default void checkCanCreateViewWithSelectFromTable(Identity identity, CatalogSchemaTableName table)
-    {
-        denyCreateViewWithSelect(table.toString());
-    }
-
-    /**
-     * Check if identity is allowed to create a view that selects from the specified view in a catalog.
-     *
-     * @throws com.facebook.presto.spi.security.AccessDeniedException if not allowed
-     */
-    default void checkCanCreateViewWithSelectFromView(Identity identity, CatalogSchemaTableName view)
-    {
-        denyCreateViewWithSelect(view.toString());
+        denyCreateViewWithSelect(table.toString(), identity);
     }
 
     /**
@@ -190,21 +283,21 @@ public interface SystemAccessControl
     }
 
     /**
-     * Check if identity is allowed to grant to any other user the specified privilege on the specified table.
+     * Check if identity is allowed to grant the specified privilege to the grantee on the specified table.
      *
      * @throws com.facebook.presto.spi.security.AccessDeniedException if not allowed
      */
-    default void checkCanGrantTablePrivilege(Identity identity, Privilege privilege, CatalogSchemaTableName table)
+    default void checkCanGrantTablePrivilege(Identity identity, Privilege privilege, CatalogSchemaTableName table, String grantee, boolean withGrantOption)
     {
         denyGrantTablePrivilege(privilege.toString(), table.toString());
     }
 
     /**
-     * Check if identity is allowed to revoke the specified privilege on the specified table from any user.
+     * Check if identity is allowed to revoke the specified privilege on the specified table from the revokee.
      *
      * @throws com.facebook.presto.spi.security.AccessDeniedException if not allowed
      */
-    default void checkCanRevokeTablePrivilege(Identity identity, Privilege privilege, CatalogSchemaTableName table)
+    default void checkCanRevokeTablePrivilege(Identity identity, Privilege privilege, CatalogSchemaTableName table, String revokee, boolean grantOptionFor)
     {
         denyRevokeTablePrivilege(privilege.toString(), table.toString());
     }

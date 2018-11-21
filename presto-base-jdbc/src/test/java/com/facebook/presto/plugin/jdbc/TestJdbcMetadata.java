@@ -25,7 +25,11 @@ import org.testng.annotations.AfterMethod;
 import org.testng.annotations.BeforeMethod;
 import org.testng.annotations.Test;
 
+import java.util.Optional;
+
 import static com.facebook.presto.plugin.jdbc.TestingDatabase.CONNECTOR_ID;
+import static com.facebook.presto.plugin.jdbc.TestingJdbcTypeHandle.JDBC_BIGINT;
+import static com.facebook.presto.plugin.jdbc.TestingJdbcTypeHandle.JDBC_VARCHAR;
 import static com.facebook.presto.spi.StandardErrorCode.NOT_FOUND;
 import static com.facebook.presto.spi.StandardErrorCode.PERMISSION_DENIED;
 import static com.facebook.presto.spi.type.BigintType.BIGINT;
@@ -81,9 +85,9 @@ public class TestJdbcMetadata
     {
         // known table
         assertEquals(metadata.getColumnHandles(SESSION, tableHandle), ImmutableMap.of(
-                "text", new JdbcColumnHandle(CONNECTOR_ID, "TEXT", VARCHAR),
-                "text_short", new JdbcColumnHandle(CONNECTOR_ID, "TEXT_SHORT", createVarcharType(32)),
-                "value", new JdbcColumnHandle(CONNECTOR_ID, "VALUE", BIGINT)));
+                "text", new JdbcColumnHandle(CONNECTOR_ID, "TEXT", JDBC_VARCHAR, VARCHAR),
+                "text_short", new JdbcColumnHandle(CONNECTOR_ID, "TEXT_SHORT", JDBC_VARCHAR, createVarcharType(32)),
+                "value", new JdbcColumnHandle(CONNECTOR_ID, "VALUE", JDBC_BIGINT, BIGINT)));
 
         // unknown table
         unknownTableColumnHandle(new JdbcTableHandle(CONNECTOR_ID, new SchemaTableName("unknown", "unknown"), "unknown", "unknown", "unknown"));
@@ -139,43 +143,48 @@ public class TestJdbcMetadata
     public void testListTables()
     {
         // all schemas
-        assertEquals(ImmutableSet.copyOf(metadata.listTables(SESSION, null)), ImmutableSet.of(
+        assertEquals(ImmutableSet.copyOf(metadata.listTables(SESSION, Optional.empty())), ImmutableSet.of(
                 new SchemaTableName("example", "numbers"),
                 new SchemaTableName("example", "view_source"),
                 new SchemaTableName("example", "view"),
                 new SchemaTableName("tpch", "orders"),
                 new SchemaTableName("tpch", "lineitem"),
+                new SchemaTableName("exa_ple", "table_with_float_col"),
                 new SchemaTableName("exa_ple", "num_ers")));
 
         // specific schema
-        assertEquals(ImmutableSet.copyOf(metadata.listTables(SESSION, "example")), ImmutableSet.of(
+        assertEquals(ImmutableSet.copyOf(metadata.listTables(SESSION, Optional.of("example"))), ImmutableSet.of(
                 new SchemaTableName("example", "numbers"),
                 new SchemaTableName("example", "view_source"),
                 new SchemaTableName("example", "view")));
-        assertEquals(ImmutableSet.copyOf(metadata.listTables(SESSION, "tpch")), ImmutableSet.of(
+        assertEquals(ImmutableSet.copyOf(metadata.listTables(SESSION, Optional.of("tpch"))), ImmutableSet.of(
                 new SchemaTableName("tpch", "orders"),
                 new SchemaTableName("tpch", "lineitem")));
-        assertEquals(ImmutableSet.copyOf(metadata.listTables(SESSION, "exa_ple")), ImmutableSet.of(
-                new SchemaTableName("exa_ple", "num_ers")));
+        assertEquals(ImmutableSet.copyOf(metadata.listTables(SESSION, Optional.of("exa_ple"))), ImmutableSet.of(
+                new SchemaTableName("exa_ple", "num_ers"),
+                new SchemaTableName("exa_ple", "table_with_float_col")));
 
         // unknown schema
-        assertEquals(ImmutableSet.copyOf(metadata.listTables(SESSION, "unknown")), ImmutableSet.of());
+        assertEquals(ImmutableSet.copyOf(metadata.listTables(SESSION, Optional.of("unknown"))), ImmutableSet.of());
     }
 
     @Test
     public void getColumnMetadata()
     {
         assertEquals(
-                metadata.getColumnMetadata(SESSION, tableHandle, new JdbcColumnHandle(CONNECTOR_ID, "text", VARCHAR)),
+                metadata.getColumnMetadata(SESSION, tableHandle, new JdbcColumnHandle(CONNECTOR_ID, "text", JDBC_VARCHAR, VARCHAR)),
                 new ColumnMetadata("text", VARCHAR));
     }
 
     @Test(expectedExceptions = PrestoException.class)
     public void testCreateTable()
     {
-        metadata.createTable(SESSION, new ConnectorTableMetadata(
-                new SchemaTableName("example", "foo"),
-                ImmutableList.of(new ColumnMetadata("text", VARCHAR))));
+        metadata.createTable(
+                SESSION,
+                new ConnectorTableMetadata(
+                        new SchemaTableName("example", "foo"),
+                        ImmutableList.of(new ColumnMetadata("text", VARCHAR))),
+                false);
     }
 
     @Test

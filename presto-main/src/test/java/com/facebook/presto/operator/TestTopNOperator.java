@@ -13,6 +13,7 @@
  */
 package com.facebook.presto.operator;
 
+import com.facebook.presto.ExceededMemoryLimitException;
 import com.facebook.presto.operator.TopNOperator.TopNOperatorFactory;
 import com.facebook.presto.spi.Page;
 import com.facebook.presto.sql.planner.plan.PlanNodeId;
@@ -25,6 +26,7 @@ import org.testng.annotations.Test;
 
 import java.util.List;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.ScheduledExecutorService;
 
 import static com.facebook.presto.RowPagesBuilder.rowPagesBuilder;
 import static com.facebook.presto.SessionTestUtils.TEST_SESSION;
@@ -36,23 +38,27 @@ import static com.facebook.presto.spi.type.DoubleType.DOUBLE;
 import static com.facebook.presto.spi.type.VarcharType.VARCHAR;
 import static com.facebook.presto.testing.MaterializedResult.resultBuilder;
 import static com.facebook.presto.testing.TestingTaskContext.createTaskContext;
+import static com.facebook.presto.testing.assertions.Assert.assertEquals;
 import static io.airlift.concurrent.Threads.daemonThreadsNamed;
 import static io.airlift.units.DataSize.Unit.BYTE;
 import static java.util.concurrent.Executors.newCachedThreadPool;
-import static org.testng.Assert.assertEquals;
+import static java.util.concurrent.Executors.newScheduledThreadPool;
+import static org.testng.Assert.fail;
 
 @Test(singleThreaded = true)
 public class TestTopNOperator
 {
     private ExecutorService executor;
+    private ScheduledExecutorService scheduledExecutor;
     private DriverContext driverContext;
 
     @BeforeMethod
     public void setUp()
     {
-        executor = newCachedThreadPool(daemonThreadsNamed("test-%s"));
-        driverContext = createTaskContext(executor, TEST_SESSION)
-                .addPipelineContext(true, true)
+        executor = newCachedThreadPool(daemonThreadsNamed("test-executor-%s"));
+        scheduledExecutor = newScheduledThreadPool(2, daemonThreadsNamed("test-scheduledExecutor-%s"));
+        driverContext = createTaskContext(executor, scheduledExecutor, TEST_SESSION)
+                .addPipelineContext(0, true, true, false)
                 .addDriverContext();
     }
 
@@ -60,11 +66,11 @@ public class TestTopNOperator
     public void tearDown()
     {
         executor.shutdownNow();
+        scheduledExecutor.shutdownNow();
     }
 
     @Test
     public void testSingleFieldKey()
-            throws Exception
     {
         List<Page> input = rowPagesBuilder(BIGINT, DOUBLE)
                 .row(1L, 0.1)
@@ -79,28 +85,24 @@ public class TestTopNOperator
                 .pageBreak()
                 .build();
 
-        TopNOperatorFactory factory = new TopNOperatorFactory(
+        TopNOperatorFactory operatorFactory = new TopNOperatorFactory(
                 0,
                 new PlanNodeId("test"),
                 ImmutableList.of(BIGINT, DOUBLE),
                 2,
                 ImmutableList.of(0),
-                ImmutableList.of(DESC_NULLS_LAST),
-                false);
-
-        Operator operator = factory.createOperator(driverContext);
+                ImmutableList.of(DESC_NULLS_LAST));
 
         MaterializedResult expected = resultBuilder(driverContext.getSession(), BIGINT, DOUBLE)
                 .row(6L, 0.6)
                 .row(5L, 0.5)
                 .build();
 
-        assertOperatorEquals(operator, input, expected);
+        assertOperatorEquals(operatorFactory, driverContext, input, expected);
     }
 
     @Test
     public void testMultiFieldKey()
-            throws Exception
     {
         List<Page> input = rowPagesBuilder(VARCHAR, BIGINT)
                 .row("a", 1L)
@@ -120,10 +122,7 @@ public class TestTopNOperator
                 ImmutableList.of(VARCHAR, BIGINT),
                 3,
                 ImmutableList.of(0, 1),
-                ImmutableList.of(DESC_NULLS_LAST, DESC_NULLS_LAST),
-                false);
-
-        Operator operator = operatorFactory.createOperator(driverContext);
+                ImmutableList.of(DESC_NULLS_LAST, DESC_NULLS_LAST));
 
         MaterializedResult expected = MaterializedResult.resultBuilder(driverContext.getSession(), VARCHAR, BIGINT)
                 .row("f", 3L)
@@ -131,12 +130,11 @@ public class TestTopNOperator
                 .row("d", 7L)
                 .build();
 
-        assertOperatorEquals(operator, input, expected);
+        assertOperatorEquals(operatorFactory, driverContext, input, expected);
     }
 
     @Test
     public void testReverseOrder()
-            throws Exception
     {
         List<Page> input = rowPagesBuilder(BIGINT, DOUBLE)
                 .row(1L, 0.1)
@@ -157,17 +155,14 @@ public class TestTopNOperator
                 ImmutableList.of(BIGINT, DOUBLE),
                 2,
                 ImmutableList.of(0),
-                ImmutableList.of(ASC_NULLS_LAST),
-                false);
-
-        Operator operator = operatorFactory.createOperator(driverContext);
+                ImmutableList.of(ASC_NULLS_LAST));
 
         MaterializedResult expected = resultBuilder(driverContext.getSession(), BIGINT, DOUBLE)
                 .row(-1L, -0.1)
                 .row(1L, 0.1)
                 .build();
 
-        assertOperatorEquals(operator, input, expected);
+        assertOperatorEquals(operatorFactory, driverContext, input, expected);
     }
 
     @Test
@@ -182,53 +177,39 @@ public class TestTopNOperator
                 ImmutableList.of(BIGINT),
                 0,
                 ImmutableList.of(0),
-                ImmutableList.of(DESC_NULLS_LAST),
-                false);
+                ImmutableList.of(DESC_NULLS_LAST));
 
-        Operator operator = factory.createOperator(driverContext);
-
-        MaterializedResult expected = resultBuilder(driverContext.getSession(), BIGINT).build();
-
-        // assertOperatorEquals assumes operators do not start in finished state
-        assertEquals(operator.isFinished(), true);
-        assertEquals(operator.needsInput(), false);
-        assertEquals(operator.getOutput(), null);
-
-        List<Page> pages = OperatorAssertion.toPages(operator, input.iterator());
-        MaterializedResult actual = OperatorAssertion.toMaterializedResult(operator.getOperatorContext().getSession(), operator.getTypes(), pages);
-        assertEquals(actual, expected);
+        try (Operator operator = factory.createOperator(driverContext)) {
+            assertEquals(operator.isFinished(), true);
+            assertEquals(operator.needsInput(), false);
+            assertEquals(operator.getOutput(), null);
+        }
     }
 
     @Test
-    public void testPartialMemoryFull()
+    public void testExceedMemoryLimit()
             throws Exception
     {
         List<Page> input = rowPagesBuilder(BIGINT)
                 .row(1L)
-                .pageBreak()
-                .row(2L)
                 .build();
 
-        DriverContext smallDiverContext = createTaskContext(executor, TEST_SESSION, new DataSize(1, BYTE), new DataSize(0, BYTE))
-                .addPipelineContext(true, true)
+        DriverContext smallDiverContext = createTaskContext(executor, scheduledExecutor, TEST_SESSION, new DataSize(1, BYTE))
+                .addPipelineContext(0, true, true, false)
                 .addDriverContext();
 
-        TopNOperatorFactory factory = new TopNOperatorFactory(
+        TopNOperatorFactory operatorFactory = new TopNOperatorFactory(
                 0,
                 new PlanNodeId("test"),
                 ImmutableList.of(BIGINT),
                 100,
                 ImmutableList.of(0),
-                ImmutableList.of(ASC_NULLS_LAST),
-                true);
-
-        Operator operator = factory.createOperator(smallDiverContext);
-
-        MaterializedResult expected = resultBuilder(driverContext.getSession(), BIGINT)
-                .row(1L)
-                .row(2L)
-                .build();
-
-        assertOperatorEquals(operator, input, expected);
+                ImmutableList.of(ASC_NULLS_LAST));
+        try (Operator operator = operatorFactory.createOperator(smallDiverContext)) {
+            operator.addInput(input.get(0));
+            fail("must fail because of exceeding local memory limit");
+        }
+        catch (ExceededMemoryLimitException ignore) {
+        }
     }
 }

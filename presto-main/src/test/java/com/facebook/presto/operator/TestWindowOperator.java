@@ -39,6 +39,7 @@ import org.testng.annotations.Test;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.ScheduledExecutorService;
 
 import static com.facebook.presto.RowPagesBuilder.rowPagesBuilder;
 import static com.facebook.presto.SessionTestUtils.TEST_SESSION;
@@ -57,43 +58,43 @@ import static com.facebook.presto.testing.MaterializedResult.resultBuilder;
 import static com.facebook.presto.testing.TestingTaskContext.createTaskContext;
 import static io.airlift.concurrent.Threads.daemonThreadsNamed;
 import static java.util.concurrent.Executors.newCachedThreadPool;
+import static java.util.concurrent.Executors.newScheduledThreadPool;
+import static org.testng.Assert.assertEquals;
 
 @Test(singleThreaded = true)
 public class TestWindowOperator
 {
-    private static final List<WindowFunctionDefinition> ROW_NUMBER = ImmutableList.of(
-            window(new ReflectionWindowFunctionSupplier<>("row_number", BIGINT, ImmutableList.<Type>of(), RowNumberFunction.class), BIGINT)
-    );
+    private static final FrameInfo UNBOUNDED_FRAME = new FrameInfo(RANGE, UNBOUNDED_PRECEDING, Optional.empty(), UNBOUNDED_FOLLOWING, Optional.empty());
+
+    public static final List<WindowFunctionDefinition> ROW_NUMBER = ImmutableList.of(
+            window(new ReflectionWindowFunctionSupplier<>("row_number", BIGINT, ImmutableList.of(), RowNumberFunction.class), BIGINT, UNBOUNDED_FRAME));
 
     private static final List<WindowFunctionDefinition> FIRST_VALUE = ImmutableList.of(
-            window(new ReflectionWindowFunctionSupplier<>("first_value", VARCHAR, ImmutableList.<Type>of(VARCHAR), FirstValueFunction.class), VARCHAR, 1)
-    );
+            window(new ReflectionWindowFunctionSupplier<>("first_value", VARCHAR, ImmutableList.<Type>of(VARCHAR), FirstValueFunction.class), VARCHAR, UNBOUNDED_FRAME, 1));
 
     private static final List<WindowFunctionDefinition> LAST_VALUE = ImmutableList.of(
-            window(new ReflectionWindowFunctionSupplier<>("last_value", VARCHAR, ImmutableList.<Type>of(VARCHAR), LastValueFunction.class), VARCHAR, 1)
-    );
+            window(new ReflectionWindowFunctionSupplier<>("last_value", VARCHAR, ImmutableList.<Type>of(VARCHAR), LastValueFunction.class), VARCHAR, UNBOUNDED_FRAME, 1));
 
     private static final List<WindowFunctionDefinition> NTH_VALUE = ImmutableList.of(
-            window(new ReflectionWindowFunctionSupplier<>("nth_value", VARCHAR, ImmutableList.of(VARCHAR, BIGINT), NthValueFunction.class), VARCHAR, 1, 3)
-    );
+            window(new ReflectionWindowFunctionSupplier<>("nth_value", VARCHAR, ImmutableList.of(VARCHAR, BIGINT), NthValueFunction.class), VARCHAR, UNBOUNDED_FRAME, 1, 3));
 
     private static final List<WindowFunctionDefinition> LAG = ImmutableList.of(
-            window(new ReflectionWindowFunctionSupplier<>("lag", VARCHAR, ImmutableList.of(VARCHAR, BIGINT, VARCHAR), LagFunction.class), VARCHAR, 1, 3, 4)
-    );
+            window(new ReflectionWindowFunctionSupplier<>("lag", VARCHAR, ImmutableList.of(VARCHAR, BIGINT, VARCHAR), LagFunction.class), VARCHAR, UNBOUNDED_FRAME, 1, 3, 4));
 
     private static final List<WindowFunctionDefinition> LEAD = ImmutableList.of(
-            window(new ReflectionWindowFunctionSupplier<>("lead", VARCHAR, ImmutableList.of(VARCHAR, BIGINT, VARCHAR), LeadFunction.class), VARCHAR, 1, 3, 4)
-    );
+            window(new ReflectionWindowFunctionSupplier<>("lead", VARCHAR, ImmutableList.of(VARCHAR, BIGINT, VARCHAR), LeadFunction.class), VARCHAR, UNBOUNDED_FRAME, 1, 3, 4));
 
     private ExecutorService executor;
+    private ScheduledExecutorService scheduledExecutor;
     private DriverContext driverContext;
 
     @BeforeMethod
     public void setUp()
     {
-        executor = newCachedThreadPool(daemonThreadsNamed("test-%s"));
-        driverContext = createTaskContext(executor, TEST_SESSION)
-                .addPipelineContext(true, true)
+        executor = newCachedThreadPool(daemonThreadsNamed("test-executor-%s"));
+        scheduledExecutor = newScheduledThreadPool(2, daemonThreadsNamed("test-scheduledExecutor-%s"));
+        driverContext = createTaskContext(executor, scheduledExecutor, TEST_SESSION)
+                .addPipelineContext(0, true, true, false)
                 .addDriverContext();
     }
 
@@ -101,11 +102,11 @@ public class TestWindowOperator
     public void tearDown()
     {
         executor.shutdownNow();
+        scheduledExecutor.shutdownNow();
     }
 
     @Test
     public void testRowNumber()
-            throws Exception
     {
         List<Page> input = rowPagesBuilder(BIGINT, DOUBLE)
                 .row(2L, 0.3)
@@ -124,8 +125,6 @@ public class TestWindowOperator
                 Ints.asList(0),
                 ImmutableList.copyOf(new SortOrder[] {SortOrder.ASC_NULLS_LAST}));
 
-        Operator operator = operatorFactory.createOperator(driverContext);
-
         MaterializedResult expected = resultBuilder(driverContext.getSession(), DOUBLE, BIGINT, BIGINT)
                 .row(-0.1, -1L, 1L)
                 .row(0.3, 2L, 2L)
@@ -134,12 +133,11 @@ public class TestWindowOperator
                 .row(0.1, 6L, 5L)
                 .build();
 
-        assertOperatorEquals(operator, input, expected);
+        assertOperatorEquals(operatorFactory, driverContext, input, expected);
     }
 
     @Test
     public void testRowNumberPartition()
-            throws Exception
     {
         List<Page> input = rowPagesBuilder(VARCHAR, BIGINT, DOUBLE, BOOLEAN)
                 .row("b", -1L, -0.1, true)
@@ -158,8 +156,6 @@ public class TestWindowOperator
                 Ints.asList(1),
                 ImmutableList.copyOf(new SortOrder[] {SortOrder.ASC_NULLS_LAST}));
 
-        Operator operator = operatorFactory.createOperator(driverContext);
-
         MaterializedResult expected = resultBuilder(driverContext.getSession(), VARCHAR, BIGINT, DOUBLE, BOOLEAN, BIGINT)
                 .row("a", 2L, 0.3, false, 1L)
                 .row("a", 4L, 0.2, true, 2L)
@@ -168,12 +164,11 @@ public class TestWindowOperator
                 .row("b", 5L, 0.4, false, 2L)
                 .build();
 
-        assertOperatorEquals(operator, input, expected);
+        assertOperatorEquals(operatorFactory, driverContext, input, expected);
     }
 
     @Test
     public void testRowNumberArbitrary()
-            throws Exception
     {
         List<Page> input = rowPagesBuilder(BIGINT)
                 .row(1L)
@@ -195,8 +190,6 @@ public class TestWindowOperator
                 Ints.asList(),
                 ImmutableList.copyOf(new SortOrder[] {}));
 
-        Operator operator = operatorFactory.createOperator(driverContext);
-
         MaterializedResult expected = resultBuilder(driverContext.getSession(), BIGINT, BIGINT)
                 .row(1L, 1L)
                 .row(3L, 2L)
@@ -208,12 +201,11 @@ public class TestWindowOperator
                 .row(8L, 8L)
                 .build();
 
-        assertOperatorEquals(operator, input, expected);
+        assertOperatorEquals(operatorFactory, driverContext, input, expected);
     }
 
-    @Test(expectedExceptions = ExceededMemoryLimitException.class, expectedExceptionsMessageRegExp = "Query exceeded local memory limit of 10B")
+    @Test(expectedExceptions = ExceededMemoryLimitException.class, expectedExceptionsMessageRegExp = "Query exceeded per-node user memory limit of 10B")
     public void testMemoryLimit()
-            throws Exception
     {
         List<Page> input = rowPagesBuilder(BIGINT, DOUBLE)
                 .row(1L, 0.1)
@@ -223,8 +215,8 @@ public class TestWindowOperator
                 .row(4L, 0.4)
                 .build();
 
-        DriverContext driverContext = createTaskContext(executor, TEST_SESSION, new DataSize(10, Unit.BYTE))
-                .addPipelineContext(true, true)
+        DriverContext driverContext = createTaskContext(executor, scheduledExecutor, TEST_SESSION, new DataSize(10, Unit.BYTE))
+                .addPipelineContext(0, true, true, false)
                 .addDriverContext();
 
         WindowOperatorFactory operatorFactory = createFactoryUnbounded(
@@ -235,14 +227,11 @@ public class TestWindowOperator
                 Ints.asList(0),
                 ImmutableList.copyOf(new SortOrder[] {SortOrder.ASC_NULLS_LAST}));
 
-        Operator operator = operatorFactory.createOperator(driverContext);
-
-        toPages(operator, input);
+        toPages(operatorFactory, driverContext, input);
     }
 
     @Test
     public void testFirstValuePartition()
-            throws Exception
     {
         List<Page> input = rowPagesBuilder(VARCHAR, VARCHAR, BIGINT, BOOLEAN, VARCHAR)
                 .row("b", "A1", 1L, true, "")
@@ -262,8 +251,6 @@ public class TestWindowOperator
                 Ints.asList(2),
                 ImmutableList.copyOf(new SortOrder[] {SortOrder.ASC_NULLS_LAST}));
 
-        Operator operator = operatorFactory.createOperator(driverContext);
-
         MaterializedResult expected = resultBuilder(driverContext.getSession(), VARCHAR, VARCHAR, BIGINT, BOOLEAN, VARCHAR)
                 .row("a", "A2", 1L, false, "A2")
                 .row("a", "B1", 2L, true, "A2")
@@ -273,12 +260,11 @@ public class TestWindowOperator
                 .row("c", "A3", 1L, true, "A3")
                 .build();
 
-        assertOperatorEquals(operator, input, expected);
+        assertOperatorEquals(operatorFactory, driverContext, input, expected);
     }
 
     @Test
     public void testLastValuePartition()
-            throws Exception
     {
         List<Page> input = rowPagesBuilder(VARCHAR, VARCHAR, BIGINT, BOOLEAN, VARCHAR)
                 .row("b", "A1", 1L, true, "")
@@ -298,8 +284,6 @@ public class TestWindowOperator
                 Ints.asList(2),
                 ImmutableList.copyOf(new SortOrder[] {SortOrder.ASC_NULLS_LAST}));
 
-        Operator operator = operatorFactory.createOperator(driverContext);
-
         MaterializedResult expected = resultBuilder(driverContext.getSession(), VARCHAR, VARCHAR, BIGINT, BOOLEAN, VARCHAR)
                 .row("a", "A2", 1L, false, "C2")
                 .row("a", "B1", 2L, true, "C2")
@@ -308,13 +292,11 @@ public class TestWindowOperator
                 .row("b", "C1", 2L, false, "C1")
                 .row("c", "A3", 1L, true, "A3")
                 .build();
-
-        assertOperatorEquals(operator, input, expected);
+        assertOperatorEquals(operatorFactory, driverContext, input, expected);
     }
 
     @Test
     public void testNthValuePartition()
-            throws Exception
     {
         List<Page> input = rowPagesBuilder(VARCHAR, VARCHAR, BIGINT, BIGINT, BOOLEAN, VARCHAR)
                 .row("b", "A1", 1L, 2L, true, "")
@@ -334,8 +316,6 @@ public class TestWindowOperator
                 Ints.asList(2),
                 ImmutableList.copyOf(new SortOrder[] {SortOrder.ASC_NULLS_LAST}));
 
-        Operator operator = operatorFactory.createOperator(driverContext);
-
         MaterializedResult expected = resultBuilder(driverContext.getSession(), VARCHAR, VARCHAR, BIGINT, BOOLEAN, VARCHAR)
                 .row("a", "A2", 1L, false, "C2")
                 .row("a", "B1", 2L, true, "B1")
@@ -345,12 +325,11 @@ public class TestWindowOperator
                 .row("c", "A3", 1L, true, null)
                 .build();
 
-        assertOperatorEquals(operator, input, expected);
+        assertOperatorEquals(operatorFactory, driverContext, input, expected);
     }
 
     @Test
     public void testLagPartition()
-            throws Exception
     {
         List<Page> input = rowPagesBuilder(VARCHAR, VARCHAR, BIGINT, BIGINT, VARCHAR, BOOLEAN, VARCHAR)
                 .row("b", "A1", 1L, 1L, "D", true, "")
@@ -370,8 +349,6 @@ public class TestWindowOperator
                 Ints.asList(2),
                 ImmutableList.copyOf(new SortOrder[] {SortOrder.ASC_NULLS_LAST}));
 
-        Operator operator = operatorFactory.createOperator(driverContext);
-
         MaterializedResult expected = resultBuilder(driverContext.getSession(), VARCHAR, VARCHAR, BIGINT, BOOLEAN, VARCHAR)
                 .row("a", "A2", 1L, false, "D")
                 .row("a", "B1", 2L, true, "D")
@@ -381,12 +358,11 @@ public class TestWindowOperator
                 .row("c", "A3", 1L, true, "D")
                 .build();
 
-        assertOperatorEquals(operator, input, expected);
+        assertOperatorEquals(operatorFactory, driverContext, input, expected);
     }
 
     @Test
     public void testLeadPartition()
-            throws Exception
     {
         List<Page> input = rowPagesBuilder(VARCHAR, VARCHAR, BIGINT, BIGINT, VARCHAR, BOOLEAN, VARCHAR)
                 .row("b", "A1", 1L, 1L, "D", true, "")
@@ -406,8 +382,6 @@ public class TestWindowOperator
                 Ints.asList(2),
                 ImmutableList.copyOf(new SortOrder[] {SortOrder.ASC_NULLS_LAST}));
 
-        Operator operator = operatorFactory.createOperator(driverContext);
-
         MaterializedResult expected = resultBuilder(driverContext.getSession(), VARCHAR, VARCHAR, BIGINT, BOOLEAN, VARCHAR)
                 .row("a", "A2", 1L, false, "C2")
                 .row("a", "B1", 2L, true, "D")
@@ -417,12 +391,11 @@ public class TestWindowOperator
                 .row("c", "A3", 1L, true, "D")
                 .build();
 
-        assertOperatorEquals(operator, input, expected);
+        assertOperatorEquals(operatorFactory, driverContext, input, expected);
     }
 
     @Test
     public void testPartiallyPreGroupedPartitionWithEmptyInput()
-            throws Exception
     {
         List<Page> input = rowPagesBuilder(BIGINT, VARCHAR, BIGINT, VARCHAR)
                 .pageBreak()
@@ -439,17 +412,14 @@ public class TestWindowOperator
                 ImmutableList.of(SortOrder.ASC_NULLS_LAST),
                 0);
 
-        Operator operator = operatorFactory.createOperator(driverContext);
-
         MaterializedResult expected = resultBuilder(driverContext.getSession(), BIGINT, VARCHAR, BIGINT, VARCHAR, BIGINT)
                 .build();
 
-        assertOperatorEquals(operator, input, expected);
+        assertOperatorEquals(operatorFactory, driverContext, input, expected);
     }
 
     @Test
     public void testPartiallyPreGroupedPartition()
-            throws Exception
     {
         List<Page> input = rowPagesBuilder(BIGINT, VARCHAR, BIGINT, VARCHAR)
                 .pageBreak()
@@ -474,8 +444,6 @@ public class TestWindowOperator
                 ImmutableList.of(SortOrder.ASC_NULLS_LAST),
                 0);
 
-        Operator operator = operatorFactory.createOperator(driverContext);
-
         MaterializedResult expected = resultBuilder(driverContext.getSession(), BIGINT, VARCHAR, BIGINT, VARCHAR, BIGINT)
                 .row(1L, "a", 100L, "A", 1L)
                 .row(2L, "a", 101L, "B", 1L)
@@ -485,12 +453,11 @@ public class TestWindowOperator
                 .row(1L, "c", 105L, "F", 1L)
                 .build();
 
-        assertOperatorEqualsIgnoreOrder(operator, input, expected);
+        assertOperatorEqualsIgnoreOrder(operatorFactory, driverContext, input, expected);
     }
 
     @Test
     public void testFullyPreGroupedPartition()
-            throws Exception
     {
         List<Page> input = rowPagesBuilder(BIGINT, VARCHAR, BIGINT, VARCHAR)
                 .pageBreak()
@@ -516,8 +483,6 @@ public class TestWindowOperator
                 ImmutableList.of(SortOrder.ASC_NULLS_LAST),
                 0);
 
-        Operator operator = operatorFactory.createOperator(driverContext);
-
         MaterializedResult expected = resultBuilder(driverContext.getSession(), BIGINT, VARCHAR, BIGINT, VARCHAR, BIGINT)
                 .row(1L, "a", 100L, "A", 1L)
                 .row(2L, "a", 101L, "B", 1L)
@@ -528,12 +493,11 @@ public class TestWindowOperator
                 .row(3L, "c", 106L, "G", 1L)
                 .build();
 
-        assertOperatorEqualsIgnoreOrder(operator, input, expected);
+        assertOperatorEqualsIgnoreOrder(operatorFactory, driverContext, input, expected);
     }
 
     @Test
     public void testFullyPreGroupedAndPartiallySortedPartition()
-            throws Exception
     {
         List<Page> input = rowPagesBuilder(BIGINT, VARCHAR, BIGINT, VARCHAR)
                 .pageBreak()
@@ -560,8 +524,6 @@ public class TestWindowOperator
                 ImmutableList.of(SortOrder.ASC_NULLS_LAST, SortOrder.ASC_NULLS_LAST),
                 1);
 
-        Operator operator = operatorFactory.createOperator(driverContext);
-
         MaterializedResult expected = resultBuilder(driverContext.getSession(), BIGINT, VARCHAR, BIGINT, VARCHAR, BIGINT)
                 .row(1L, "a", 100L, "A", 1L)
                 .row(2L, "a", 100L, "A", 1L)
@@ -573,12 +535,11 @@ public class TestWindowOperator
                 .row(3L, "c", 100L, "A", 1L)
                 .build();
 
-        assertOperatorEqualsIgnoreOrder(operator, input, expected);
+        assertOperatorEqualsIgnoreOrder(operatorFactory, driverContext, input, expected);
     }
 
     @Test
     public void testFullyPreGroupedAndFullySortedPartition()
-            throws Exception
     {
         List<Page> input = rowPagesBuilder(BIGINT, VARCHAR, BIGINT, VARCHAR)
                 .pageBreak()
@@ -605,8 +566,6 @@ public class TestWindowOperator
                 ImmutableList.of(SortOrder.ASC_NULLS_LAST),
                 1);
 
-        Operator operator = operatorFactory.createOperator(driverContext);
-
         MaterializedResult expected = resultBuilder(driverContext.getSession(), BIGINT, VARCHAR, BIGINT, VARCHAR, BIGINT)
                 .row(1L, "a", 100L, "A", 1L)
                 .row(2L, "a", 101L, "A", 1L)
@@ -619,7 +578,39 @@ public class TestWindowOperator
                 .build();
 
         // Since fully grouped and sorted already, should respect original input order
-        assertOperatorEquals(operator, input, expected);
+        assertOperatorEquals(operatorFactory, driverContext, input, expected);
+    }
+
+    @Test
+    public void testFindEndPosition()
+    {
+        assertFindEndPosition("0", 1);
+        assertFindEndPosition("11", 2);
+        assertFindEndPosition("1111111111", 10);
+
+        assertFindEndPosition("01", 1);
+        assertFindEndPosition("011", 1);
+        assertFindEndPosition("0111", 1);
+        assertFindEndPosition("0111111111", 1);
+
+        assertFindEndPosition("012", 1);
+        assertFindEndPosition("01234", 1);
+        assertFindEndPosition("0123456789", 1);
+
+        assertFindEndPosition("001", 2);
+        assertFindEndPosition("0001", 3);
+        assertFindEndPosition("0000000001", 9);
+
+        assertFindEndPosition("000111", 3);
+        assertFindEndPosition("0001111", 3);
+        assertFindEndPosition("0000111", 4);
+        assertFindEndPosition("000000000000001111111111", 14);
+    }
+
+    private static void assertFindEndPosition(String values, int expected)
+    {
+        char[] array = values.toCharArray();
+        assertEquals(WindowOperator.findEndPosition(0, array.length, (first, second) -> array[first] == array[second]), expected);
     }
 
     private static WindowOperatorFactory createFactoryUnbounded(
@@ -641,7 +632,7 @@ public class TestWindowOperator
                 0);
     }
 
-    private static WindowOperatorFactory createFactoryUnbounded(
+    public static WindowOperatorFactory createFactoryUnbounded(
             List<? extends Type> sourceTypes,
             List<Integer> outputChannels,
             List<WindowFunctionDefinition> functions,
@@ -662,7 +653,7 @@ public class TestWindowOperator
                 sortChannels,
                 sortOrder,
                 preSortedChannelPrefix,
-                new FrameInfo(RANGE, UNBOUNDED_PRECEDING, Optional.empty(), UNBOUNDED_FOLLOWING, Optional.empty()),
-                10);
+                10,
+                new PagesIndex.TestingFactory(false));
     }
 }

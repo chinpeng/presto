@@ -15,16 +15,19 @@ package com.facebook.presto.connector.jmx;
 
 import com.google.common.collect.EvictingQueue;
 import com.google.common.collect.ImmutableList;
-import com.google.common.collect.ImmutableSet;
-import com.google.inject.Inject;
 
+import javax.inject.Inject;
+
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 
 import static com.google.common.base.Preconditions.checkArgument;
+import static java.util.stream.Collectors.toSet;
 
 public class JmxHistoricalData
 {
@@ -39,7 +42,9 @@ public class JmxHistoricalData
 
     public JmxHistoricalData(int maxEntries, Set<String> tableNames)
     {
-        tables = ImmutableSet.copyOf(tableNames);
+        tables = tableNames.stream()
+                .map(tableName -> tableName.toLowerCase(Locale.ENGLISH))
+                .collect(toSet());
         for (String tableName : tables) {
             tableData.put(tableName, EvictingQueue.create(maxEntries));
         }
@@ -52,27 +57,29 @@ public class JmxHistoricalData
 
     public synchronized void addRow(String tableName, List<Object> row)
     {
-        checkArgument(tableData.containsKey(tableName));
-        tableData.get(tableName).add(row);
+        String lowerCaseTableName = tableName.toLowerCase(Locale.ENGLISH);
+        checkArgument(tableData.containsKey(lowerCaseTableName));
+        tableData.get(lowerCaseTableName).add(row);
     }
 
-    public synchronized List<List<Object>> getRows(String tableName, List<Integer> selectedColumns)
+    public synchronized List<List<Object>> getRows(String objectName, List<Integer> selectedColumns)
     {
-        if (!tableData.containsKey(tableName)) {
+        String lowerCaseObjectName = objectName.toLowerCase(Locale.ENGLISH);
+        if (!tableData.containsKey(lowerCaseObjectName)) {
             return ImmutableList.of();
         }
-        return projectRows(tableData.get(tableName), selectedColumns);
+        return projectRows(tableData.get(lowerCaseObjectName), selectedColumns);
     }
 
     private List<List<Object>> projectRows(Collection<List<Object>> rows, List<Integer> selectedColumns)
     {
         ImmutableList.Builder<List<Object>> result = ImmutableList.builder();
         for (List<Object> row : rows) {
-            ImmutableList.Builder<Object> projectedRow = ImmutableList.builder();
+            List<Object> projectedRow = new ArrayList<>();
             for (Integer selectedColumn : selectedColumns) {
                 projectedRow.add(row.get(selectedColumn));
             }
-            result.add(projectedRow.build());
+            result.add(projectedRow);
         }
         return result.build();
     }

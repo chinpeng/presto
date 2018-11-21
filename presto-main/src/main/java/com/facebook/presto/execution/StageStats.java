@@ -14,9 +14,11 @@
 package com.facebook.presto.execution;
 
 import com.facebook.presto.operator.BlockedReason;
+import com.facebook.presto.operator.OperatorStats;
+import com.facebook.presto.spi.eventlistener.StageGcStatistics;
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
-import com.google.common.annotations.VisibleForTesting;
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
 import io.airlift.stats.Distribution.DistributionSnapshot;
 import io.airlift.units.DataSize;
@@ -25,6 +27,7 @@ import org.joda.time.DateTime;
 
 import javax.annotation.concurrent.Immutable;
 
+import java.util.List;
 import java.util.Set;
 
 import static com.google.common.base.Preconditions.checkArgument;
@@ -46,15 +49,16 @@ public class StageStats
     private final int totalDrivers;
     private final int queuedDrivers;
     private final int runningDrivers;
+    private final int blockedDrivers;
     private final int completedDrivers;
 
-    private final double cumulativeMemory;
+    private final double cumulativeUserMemory;
+    private final DataSize userMemoryReservation;
     private final DataSize totalMemoryReservation;
-    private final DataSize peakMemoryReservation;
+    private final DataSize peakUserMemoryReservation;
 
     private final Duration totalScheduledTime;
     private final Duration totalCpuTime;
-    private final Duration totalUserTime;
     private final Duration totalBlockedTime;
     private final boolean fullyBlocked;
     private final Set<BlockedReason> blockedReasons;
@@ -65,39 +69,15 @@ public class StageStats
     private final DataSize processedInputDataSize;
     private final long processedInputPositions;
 
+    private final DataSize bufferedDataSize;
     private final DataSize outputDataSize;
     private final long outputPositions;
 
-    @VisibleForTesting
-    public StageStats()
-    {
-        this.schedulingComplete = null;
-        this.getSplitDistribution = null;
-        this.scheduleTaskDistribution = null;
-        this.addSplitDistribution = null;
-        this.totalTasks = 0;
-        this.runningTasks = 0;
-        this.completedTasks = 0;
-        this.totalDrivers = 0;
-        this.queuedDrivers = 0;
-        this.runningDrivers = 0;
-        this.completedDrivers = 0;
-        this.cumulativeMemory = 0.0;
-        this.totalMemoryReservation = null;
-        this.peakMemoryReservation = null;
-        this.totalScheduledTime = null;
-        this.totalCpuTime = null;
-        this.totalUserTime = null;
-        this.totalBlockedTime = null;
-        this.fullyBlocked = false;
-        this.blockedReasons = ImmutableSet.of();
-        this.rawInputDataSize = null;
-        this.rawInputPositions = 0;
-        this.processedInputDataSize = null;
-        this.processedInputPositions = 0;
-        this.outputDataSize = null;
-        this.outputPositions = 0;
-    }
+    private final DataSize physicalWrittenDataSize;
+
+    private final StageGcStatistics gcInfo;
+
+    private final List<OperatorStats> operatorSummaries;
 
     @JsonCreator
     public StageStats(
@@ -114,15 +94,16 @@ public class StageStats
             @JsonProperty("totalDrivers") int totalDrivers,
             @JsonProperty("queuedDrivers") int queuedDrivers,
             @JsonProperty("runningDrivers") int runningDrivers,
+            @JsonProperty("blockedDrivers") int blockedDrivers,
             @JsonProperty("completedDrivers") int completedDrivers,
 
-            @JsonProperty("cumulativeMemory") double cumulativeMemory,
+            @JsonProperty("cumulativeUserMemory") double cumulativeUserMemory,
+            @JsonProperty("userMemoryReservation") DataSize userMemoryReservation,
             @JsonProperty("totalMemoryReservation") DataSize totalMemoryReservation,
-            @JsonProperty("peakMemoryReservation") DataSize peakMemoryReservation,
+            @JsonProperty("peakUserMemoryReservation") DataSize peakUserMemoryReservation,
 
             @JsonProperty("totalScheduledTime") Duration totalScheduledTime,
             @JsonProperty("totalCpuTime") Duration totalCpuTime,
-            @JsonProperty("totalUserTime") Duration totalUserTime,
             @JsonProperty("totalBlockedTime") Duration totalBlockedTime,
             @JsonProperty("fullyBlocked") boolean fullyBlocked,
             @JsonProperty("blockedReasons") Set<BlockedReason> blockedReasons,
@@ -133,8 +114,15 @@ public class StageStats
             @JsonProperty("processedInputDataSize") DataSize processedInputDataSize,
             @JsonProperty("processedInputPositions") long processedInputPositions,
 
+            @JsonProperty("bufferedDataSize") DataSize bufferedDataSize,
             @JsonProperty("outputDataSize") DataSize outputDataSize,
-            @JsonProperty("outputPositions") long outputPositions)
+            @JsonProperty("outputPositions") long outputPositions,
+
+            @JsonProperty("physicalWrittenDataSize") DataSize physicalWrittenDataSize,
+
+            @JsonProperty("gcInfo") StageGcStatistics gcInfo,
+
+            @JsonProperty("operatorSummaries") List<OperatorStats> operatorSummaries)
     {
         this.schedulingComplete = schedulingComplete;
         this.getSplitDistribution = requireNonNull(getSplitDistribution, "getSplitDistribution is null");
@@ -154,16 +142,18 @@ public class StageStats
         this.queuedDrivers = queuedDrivers;
         checkArgument(runningDrivers >= 0, "runningDrivers is negative");
         this.runningDrivers = runningDrivers;
+        checkArgument(blockedDrivers >= 0, "blockedDrivers is negative");
+        this.blockedDrivers = blockedDrivers;
         checkArgument(completedDrivers >= 0, "completedDrivers is negative");
         this.completedDrivers = completedDrivers;
-
-        this.cumulativeMemory = requireNonNull(cumulativeMemory, "cumulativeMemory is null");
+        checkArgument(cumulativeUserMemory >= 0, "cumulativeUserMemory is negative");
+        this.cumulativeUserMemory = cumulativeUserMemory;
+        this.userMemoryReservation = requireNonNull(userMemoryReservation, "userMemoryReservation is null");
         this.totalMemoryReservation = requireNonNull(totalMemoryReservation, "totalMemoryReservation is null");
-        this.peakMemoryReservation = requireNonNull(peakMemoryReservation, "peakMemoryReservation is null");
+        this.peakUserMemoryReservation = requireNonNull(peakUserMemoryReservation, "peakUserMemoryReservation is null");
 
         this.totalScheduledTime = requireNonNull(totalScheduledTime, "totalScheduledTime is null");
         this.totalCpuTime = requireNonNull(totalCpuTime, "totalCpuTime is null");
-        this.totalUserTime = requireNonNull(totalUserTime, "totalUserTime is null");
         this.totalBlockedTime = requireNonNull(totalBlockedTime, "totalBlockedTime is null");
         this.fullyBlocked = fullyBlocked;
         this.blockedReasons = ImmutableSet.copyOf(requireNonNull(blockedReasons, "blockedReasons is null"));
@@ -176,9 +166,16 @@ public class StageStats
         checkArgument(processedInputPositions >= 0, "processedInputPositions is negative");
         this.processedInputPositions = processedInputPositions;
 
+        this.bufferedDataSize = requireNonNull(bufferedDataSize, "bufferedDataSize is null");
         this.outputDataSize = requireNonNull(outputDataSize, "outputDataSize is null");
         checkArgument(outputPositions >= 0, "outputPositions is negative");
         this.outputPositions = outputPositions;
+
+        this.physicalWrittenDataSize = requireNonNull(physicalWrittenDataSize, "writtenDataSize is null");
+
+        this.gcInfo = requireNonNull(gcInfo, "gcInfo is null");
+
+        this.operatorSummaries = ImmutableList.copyOf(requireNonNull(operatorSummaries, "operatorSummaries is null"));
     }
 
     @JsonProperty
@@ -242,15 +239,27 @@ public class StageStats
     }
 
     @JsonProperty
+    public int getBlockedDrivers()
+    {
+        return blockedDrivers;
+    }
+
+    @JsonProperty
     public int getCompletedDrivers()
     {
         return completedDrivers;
     }
 
     @JsonProperty
-    public double getCumulativeMemory()
+    public double getCumulativeUserMemory()
     {
-        return cumulativeMemory;
+        return cumulativeUserMemory;
+    }
+
+    @JsonProperty
+    public DataSize getUserMemoryReservation()
+    {
+        return userMemoryReservation;
     }
 
     @JsonProperty
@@ -260,9 +269,9 @@ public class StageStats
     }
 
     @JsonProperty
-    public DataSize getPeakMemoryReservation()
+    public DataSize getPeakUserMemoryReservation()
     {
-        return peakMemoryReservation;
+        return peakUserMemoryReservation;
     }
 
     @JsonProperty
@@ -275,12 +284,6 @@ public class StageStats
     public Duration getTotalCpuTime()
     {
         return totalCpuTime;
-    }
-
-    @JsonProperty
-    public Duration getTotalUserTime()
-    {
-        return totalUserTime;
     }
 
     @JsonProperty
@@ -326,6 +329,12 @@ public class StageStats
     }
 
     @JsonProperty
+    public DataSize getBufferedDataSize()
+    {
+        return bufferedDataSize;
+    }
+
+    @JsonProperty
     public DataSize getOutputDataSize()
     {
         return outputDataSize;
@@ -335,5 +344,23 @@ public class StageStats
     public long getOutputPositions()
     {
         return outputPositions;
+    }
+
+    @JsonProperty
+    public DataSize getPhysicalWrittenDataSize()
+    {
+        return physicalWrittenDataSize;
+    }
+
+    @JsonProperty
+    public StageGcStatistics getGcInfo()
+    {
+        return gcInfo;
+    }
+
+    @JsonProperty
+    public List<OperatorStats> getOperatorSummaries()
+    {
+        return operatorSummaries;
     }
 }

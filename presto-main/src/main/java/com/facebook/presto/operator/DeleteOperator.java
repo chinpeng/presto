@@ -27,7 +27,6 @@ import io.airlift.slice.Slice;
 import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
-import java.util.concurrent.CompletableFuture;
 import java.util.function.Supplier;
 
 import static com.facebook.presto.spi.type.BigintType.BIGINT;
@@ -40,7 +39,7 @@ import static java.util.Objects.requireNonNull;
 public class DeleteOperator
         implements Operator
 {
-    public static final List<Type> TYPES = ImmutableList.<Type>of(BIGINT, VARBINARY);
+    public static final List<Type> TYPES = ImmutableList.of(BIGINT, VARBINARY);
 
     public static class DeleteOperatorFactory
             implements OperatorFactory
@@ -58,12 +57,6 @@ public class DeleteOperator
         }
 
         @Override
-        public List<Type> getTypes()
-        {
-            return TYPES;
-        }
-
-        @Override
         public Operator createOperator(DriverContext driverContext)
         {
             checkState(!closed, "Factory is already closed");
@@ -72,7 +65,7 @@ public class DeleteOperator
         }
 
         @Override
-        public void close()
+        public void noMoreOperators()
         {
             closed = true;
         }
@@ -95,7 +88,7 @@ public class DeleteOperator
     private State state = State.RUNNING;
     private long rowCount;
     private boolean closed;
-    private CompletableFuture<Collection<Slice>> finishFuture;
+    private ListenableFuture<Collection<Slice>> finishFuture;
     private Supplier<Optional<UpdatablePageSource>> pageSource = Optional::empty;
 
     public DeleteOperator(OperatorContext operatorContext, int rowIdChannel)
@@ -111,18 +104,11 @@ public class DeleteOperator
     }
 
     @Override
-    public List<Type> getTypes()
-    {
-        return TYPES;
-    }
-
-    @Override
     public void finish()
     {
         if (state == State.RUNNING) {
             state = State.FINISHING;
-            finishFuture = pageSource().finish();
-            requireNonNull(finishFuture, "finishFuture is null");
+            finishFuture = toListenableFuture(pageSource().finish());
         }
     }
 
@@ -155,8 +141,7 @@ public class DeleteOperator
         if (finishFuture == null) {
             return NOT_BLOCKED;
         }
-
-        return toListenableFuture(finishFuture);
+        return finishFuture;
     }
 
     @Override
@@ -169,7 +154,9 @@ public class DeleteOperator
 
         Collection<Slice> fragments = getFutureValue(finishFuture);
 
-        PageBuilder page = new PageBuilder(TYPES);
+        // output page will only be constructed once,
+        // so a new PageBuilder is constructed (instead of using PageBuilder.reset)
+        PageBuilder page = new PageBuilder(fragments.size() + 1, TYPES);
         BlockBuilder rowsBuilder = page.getBlockBuilder(0);
         BlockBuilder fragmentBuilder = page.getBlockBuilder(1);
 
@@ -190,7 +177,6 @@ public class DeleteOperator
 
     @Override
     public void close()
-            throws Exception
     {
         if (!closed) {
             closed = true;

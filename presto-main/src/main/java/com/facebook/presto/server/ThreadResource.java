@@ -50,7 +50,7 @@ public class ThreadResource
     @GET
     @Path("/v1/thread")
     @Produces(MediaType.APPLICATION_JSON)
-    public List<Info> getThreadInfo()
+    public static List<Info> getThreadInfo()
     {
         ThreadMXBean mbean = ManagementFactory.getThreadMXBean();
 
@@ -94,7 +94,7 @@ public class ThreadResource
                 @JsonProperty("id") long id,
                 @JsonProperty("name") String name,
                 @JsonProperty("state") String state,
-                @JsonProperty("lockOwner") Long lockOwnerId,
+                @JsonProperty("lockOwnerId") Long lockOwnerId,
                 @JsonProperty("stackTrace") List<StackLine> stackTrace)
         {
             this.id = id;
@@ -158,7 +158,7 @@ public class ThreadResource
         public StackLine(
                 @JsonProperty("file") String file,
                 @JsonProperty("line") int line,
-                @JsonProperty("class") String className,
+                @JsonProperty("className") String className,
                 @JsonProperty("method") String method)
         {
             this.file = file;

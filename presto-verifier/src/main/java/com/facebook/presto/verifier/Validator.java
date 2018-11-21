@@ -18,9 +18,9 @@ import com.facebook.presto.jdbc.PrestoStatement;
 import com.facebook.presto.jdbc.QueryStats;
 import com.facebook.presto.spi.type.SqlVarbinary;
 import com.facebook.presto.verifier.Validator.ChangedRow.Changed;
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Joiner;
 import com.google.common.base.Stopwatch;
-import com.google.common.base.Throwables;
 import com.google.common.collect.ComparisonChain;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSortedMultiset;
@@ -35,7 +35,6 @@ import com.google.common.util.concurrent.UncheckedTimeoutException;
 import io.airlift.units.Duration;
 
 import java.math.BigDecimal;
-import java.math.MathContext;
 import java.sql.Array;
 import java.sql.Connection;
 import java.sql.DriverManager;
@@ -48,7 +47,7 @@ import java.util.Arrays;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 import java.util.function.Function;
@@ -62,6 +61,8 @@ import static io.airlift.units.Duration.nanosSince;
 import static java.lang.String.format;
 import static java.util.Collections.unmodifiableList;
 import static java.util.Objects.requireNonNull;
+import static java.util.concurrent.Executors.newSingleThreadExecutor;
+import static java.util.concurrent.TimeUnit.MILLISECONDS;
 
 public class Validator
 {
@@ -206,12 +207,12 @@ public class Validator
 
         // query has too many rows. Consider blacklisting.
         if (controlResult.getState() == State.TOO_MANY_ROWS) {
-            testResult = new QueryResult(State.INVALID, null, null, null, ImmutableList.<List<Object>>of());
+            testResult = new QueryResult(State.INVALID, null, null, null, null, ImmutableList.of());
             return false;
         }
         // query failed in the control
         if (controlResult.getState() != State.SUCCESS) {
-            testResult = new QueryResult(State.INVALID, null, null, null, ImmutableList.<List<Object>>of());
+            testResult = new QueryResult(State.INVALID, null, null, null, null, ImmutableList.of());
             return true;
         }
 
@@ -239,11 +240,11 @@ public class Validator
             QueryResult queryResult = executor.apply(postqueryString);
             postQueryResults.add(queryResult);
             if (queryResult.getState() != State.SUCCESS) {
-                return new QueryResult(State.FAILED_TO_TEARDOWN, queryResult.getException(), queryResult.getWallTime(), queryResult.getCpuTime(), ImmutableList.<List<Object>>of());
+                return new QueryResult(State.FAILED_TO_TEARDOWN, queryResult.getException(), queryResult.getWallTime(), queryResult.getCpuTime(), queryResult.getQueryId(), ImmutableList.of());
             }
         }
 
-        return new QueryResult(State.SUCCESS, null, null, null, ImmutableList.of());
+        return new QueryResult(State.SUCCESS, null, null, null, null, ImmutableList.of());
     }
 
     private static QueryResult setup(Query query, List<QueryResult> preQueryResults, Function<String, QueryResult> executor)
@@ -252,12 +253,15 @@ public class Validator
         for (String prequeryString : query.getPreQueries()) {
             QueryResult queryResult = executor.apply(prequeryString);
             preQueryResults.add(queryResult);
-            if (queryResult.getState() != State.SUCCESS) {
-                return new QueryResult(State.FAILED_TO_SETUP, queryResult.getException(), queryResult.getWallTime(), queryResult.getCpuTime(), ImmutableList.<List<Object>>of());
+            if (queryResult.getState() == State.TIMEOUT) {
+                return queryResult;
+            }
+            else if (queryResult.getState() != State.SUCCESS) {
+                return new QueryResult(State.FAILED_TO_SETUP, queryResult.getException(), queryResult.getWallTime(), queryResult.getCpuTime(), queryResult.getQueryId(), ImmutableList.of());
             }
         }
 
-        return new QueryResult(State.SUCCESS, null, null, null, ImmutableList.of());
+        return new QueryResult(State.SUCCESS, null, null, null, null, ImmutableList.of());
     }
 
     private boolean checkForDeterministicAndRerunTestQueriesIfNeeded()
@@ -294,7 +298,7 @@ public class Validator
     private QueryResult executeQueryTest()
     {
         Query query = queryPair.getTest();
-        QueryResult queryResult = new QueryResult(State.INVALID, null, null, null, ImmutableList.<List<Object>>of());
+        QueryResult queryResult = new QueryResult(State.INVALID, null, null, null, null, ImmutableList.of());
         try {
             // startup
             queryResult = setup(query, testPreQueryResults, testPrequery -> executeQuery(testGateway, testUsername, testPassword, queryPair.getTest(), testPrequery, testTimeout, sessionProperties));
@@ -331,7 +335,7 @@ public class Validator
     private QueryResult executeQueryControl()
     {
         Query query = queryPair.getControl();
-        QueryResult queryResult = new QueryResult(State.INVALID, null, null, null, ImmutableList.<List<Object>>of());
+        QueryResult queryResult = new QueryResult(State.INVALID, null, null, null, null, ImmutableList.of());
         try {
             // startup
             queryResult = setup(query, controlPreQueryResults, controlPrequery -> executeQuery(controlGateway, controlUsername, controlPassword, queryPair.getControl(), controlPrequery, controlTimeout, sessionProperties));
@@ -402,6 +406,10 @@ public class Validator
 
     private QueryResult executeQuery(String url, String username, String password, Query query, String sql, Duration timeout, Map<String, String> sessionProperties)
     {
+        ExecutorService executor = newSingleThreadExecutor();
+        TimeLimiter limiter = SimpleTimeLimiter.create(executor);
+
+        String queryId = null;
         try (Connection connection = DriverManager.getConnection(url, username, password)) {
             trySetConnectionProperties(query, connection);
             for (Map.Entry<String, String> entry : sessionProperties.entrySet()) {
@@ -409,55 +417,39 @@ public class Validator
             }
 
             try (Statement statement = connection.createStatement()) {
-                TimeLimiter limiter = new SimpleTimeLimiter();
                 Stopwatch stopwatch = Stopwatch.createStarted();
-                Statement limitedStatement = limiter.newProxy(statement, Statement.class, timeout.toMillis(), TimeUnit.MILLISECONDS);
+                Statement limitedStatement = limiter.newProxy(statement, Statement.class, timeout.toMillis(), MILLISECONDS);
                 if (explainOnly) {
                     sql = "EXPLAIN " + sql;
                 }
+
                 long start = System.nanoTime();
                 PrestoStatement prestoStatement = limitedStatement.unwrap(PrestoStatement.class);
                 ProgressMonitor progressMonitor = new ProgressMonitor();
                 prestoStatement.setProgressMonitor(progressMonitor);
-                try {
-                    boolean isSelectQuery = limitedStatement.execute(sql);
-                    List<List<Object>> results = null;
-                    if (isSelectQuery) {
-                        results = limiter.callWithTimeout(
-                                getResultSetConverter(limitedStatement.getResultSet()),
-                                timeout.toMillis() - stopwatch.elapsed(TimeUnit.MILLISECONDS),
-                                TimeUnit.MILLISECONDS, true);
-                    }
-                    else {
-                        results = ImmutableList.of(ImmutableList.of(limitedStatement.getLargeUpdateCount()));
-                    }
-                    prestoStatement.clearProgressMonitor();
-                    QueryStats queryStats = progressMonitor.getFinalQueryStats();
-                    if (queryStats == null) {
-                        throw new VerifierException("Cannot fetch query stats");
-                    }
-                    Duration queryCpuTime = new Duration(queryStats.getCpuTimeMillis(), TimeUnit.MILLISECONDS);
-                    return new QueryResult(State.SUCCESS, null, nanosSince(start), queryCpuTime, results);
+                boolean isSelectQuery = limitedStatement.execute(sql);
+
+                List<List<Object>> results;
+                if (isSelectQuery) {
+                    ResultSetConverter converter = limiter.newProxy(
+                            this::convertJdbcResultSet,
+                            ResultSetConverter.class,
+                            timeout.toMillis() - stopwatch.elapsed(MILLISECONDS),
+                            MILLISECONDS);
+                    results = converter.convert(limitedStatement.getResultSet());
                 }
-                catch (AssertionError e) {
-                    if (e.getMessage().startsWith("unimplemented type:")) {
-                        return new QueryResult(State.INVALID, null, null, null, ImmutableList.<List<Object>>of());
-                    }
-                    throw e;
+                else {
+                    results = ImmutableList.of(ImmutableList.of(limitedStatement.getLargeUpdateCount()));
                 }
-                catch (SQLException | VerifierException e) {
-                    throw e;
+
+                prestoStatement.clearProgressMonitor();
+                QueryStats queryStats = progressMonitor.getFinalQueryStats();
+                if (queryStats == null) {
+                    throw new VerifierException("Cannot fetch query stats");
                 }
-                catch (UncheckedTimeoutException e) {
-                    return new QueryResult(State.TIMEOUT, null, null, null, ImmutableList.<List<Object>>of());
-                }
-                catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    throw Throwables.propagate(e);
-                }
-                catch (Exception e) {
-                    throw Throwables.propagate(e);
-                }
+                Duration queryCpuTime = new Duration(queryStats.getCpuTimeMillis(), MILLISECONDS);
+                queryId = queryStats.getQueryId();
+                return new QueryResult(State.SUCCESS, null, nanosSince(start), queryCpuTime, queryId, results);
             }
         }
         catch (SQLException e) {
@@ -467,10 +459,16 @@ public class Validator
                 exception = (Exception) e.getCause();
             }
             State state = isPrestoQueryInvalid(e) ? State.INVALID : State.FAILED;
-            return new QueryResult(state, exception, null, null, null);
+            return new QueryResult(state, exception, null, null, queryId, ImmutableList.of());
         }
         catch (VerifierException e) {
-            return new QueryResult(State.TOO_MANY_ROWS, e, null, null, null);
+            return new QueryResult(State.TOO_MANY_ROWS, e, null, null, queryId, ImmutableList.of());
+        }
+        catch (UncheckedTimeoutException e) {
+            return new QueryResult(State.TIMEOUT, e, null, null, queryId, ImmutableList.of());
+        }
+        finally {
+            executor.shutdownNow();
         }
     }
 
@@ -487,11 +485,6 @@ public class Validator
         catch (SQLClientInfoException ignored) {
             // Do nothing
         }
-    }
-
-    private Callable<List<List<Object>>> getResultSetConverter(ResultSet resultSet)
-    {
-        return () -> convertJdbcResultSet(resultSet);
     }
 
     private static boolean isPrestoQueryInvalid(SQLException e)
@@ -711,16 +704,33 @@ public class Validator
         return x instanceof Byte || x instanceof Short || x instanceof Integer || x instanceof Long;
     }
 
-    private static int precisionCompare(double a, double b, int precision)
+    //adapted from http://floating-point-gui.de/errors/comparison/
+    private static boolean isClose(double a, double b, double epsilon)
     {
+        double absA = Math.abs(a);
+        double absB = Math.abs(b);
+        double diff = Math.abs(a - b);
+
         if (!isFinite(a) || !isFinite(b)) {
-            return Double.compare(a, b);
+            return Double.compare(a, b) == 0;
         }
 
-        MathContext context = new MathContext(precision);
-        BigDecimal x = new BigDecimal(a).round(context);
-        BigDecimal y = new BigDecimal(b).round(context);
-        return x.compareTo(y);
+        // a or b is zero or both are extremely close to it
+        // relative error is less meaningful here
+        if (a == 0 || b == 0 || diff < Float.MIN_NORMAL) {
+            return diff < (epsilon * Float.MIN_NORMAL);
+        }
+        else {
+            // use relative error
+            return diff / Math.min((absA + absB), Float.MAX_VALUE) < epsilon;
+        }
+    }
+
+    @VisibleForTesting
+    static int precisionCompare(double a, double b, int precision)
+    {
+        //we don't care whether a is smaller than b or not when they are not close since we will fail verification anyway
+        return isClose(a, b, Math.pow(10, -1 * (precision - 1))) ? 0 : -1;
     }
 
     public static class ChangedRow
@@ -767,7 +777,7 @@ public class Validator
             implements Consumer<QueryStats>
     {
         private QueryStats queryStats;
-        private boolean finished = false;
+        private boolean finished;
 
         @Override
         public synchronized void accept(QueryStats queryStats)
@@ -781,5 +791,11 @@ public class Validator
             finished = true;
             return queryStats;
         }
+    }
+
+    public interface ResultSetConverter
+    {
+        List<List<Object>> convert(ResultSet resultSet)
+                throws SQLException, VerifierException;
     }
 }

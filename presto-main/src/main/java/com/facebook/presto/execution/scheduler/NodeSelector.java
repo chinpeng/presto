@@ -17,7 +17,7 @@ import com.facebook.presto.execution.RemoteTask;
 import com.facebook.presto.metadata.Split;
 import com.facebook.presto.spi.Node;
 import com.facebook.presto.sql.planner.NodePartitionMap;
-import com.google.common.collect.Multimap;
+import com.google.common.collect.ImmutableSet;
 
 import java.util.List;
 import java.util.Set;
@@ -30,23 +30,30 @@ public interface NodeSelector
 
     Node selectCurrentNode();
 
-    List<Node> selectRandomNodes(int limit);
+    default List<Node> selectRandomNodes(int limit)
+    {
+        return selectRandomNodes(limit, ImmutableSet.of());
+    }
+
+    List<Node> selectRandomNodes(int limit, Set<Node> excludedNodes);
 
     /**
      * Identifies the nodes for running the specified splits.
      *
      * @param splits the splits that need to be assigned to nodes
      * @return a multimap from node to splits only for splits for which we could identify a node to schedule on.
-     * If we cannot find an assignment for a split, it is not included in the map.
+     * If we cannot find an assignment for a split, it is not included in the map. Also returns a future indicating when
+     * to reattempt scheduling of this batch of splits, if some of them could not be scheduled.
      */
-    Multimap<Node, Split> computeAssignments(Set<Split> splits, List<RemoteTask> existingTasks);
+    SplitPlacementResult computeAssignments(Set<Split> splits, List<RemoteTask> existingTasks);
 
     /**
      * Identifies the nodes for running the specified splits based on a precomputed fixed partitioning.
      *
      * @param splits the splits that need to be assigned to nodes
      * @return a multimap from node to splits only for splits for which we could identify a node with free space.
-     * If we cannot find an assignment for a split, it is not included in the map.
+     * If we cannot find an assignment for a split, it is not included in the map. Also returns a future indicating when
+     * to reattempt scheduling of this batch of splits, if some of them could not be scheduled.
      */
-    Multimap<Node, Split> computeAssignments(Set<Split> splits, List<RemoteTask> existingTasks, NodePartitionMap partitioning);
+    SplitPlacementResult computeAssignments(Set<Split> splits, List<RemoteTask> existingTasks, NodePartitionMap partitioning);
 }

@@ -14,11 +14,11 @@
 package com.facebook.presto.sql.planner.optimizations;
 
 import com.facebook.presto.Session;
+import com.facebook.presto.execution.warnings.WarningCollector;
 import com.facebook.presto.metadata.Metadata;
-import com.facebook.presto.spi.type.Type;
 import com.facebook.presto.sql.planner.PlanNodeIdAllocator;
-import com.facebook.presto.sql.planner.Symbol;
 import com.facebook.presto.sql.planner.SymbolAllocator;
+import com.facebook.presto.sql.planner.TypeProvider;
 import com.facebook.presto.sql.planner.plan.DeleteNode;
 import com.facebook.presto.sql.planner.plan.ExchangeNode;
 import com.facebook.presto.sql.planner.plan.MetadataDeleteNode;
@@ -29,18 +29,21 @@ import com.facebook.presto.sql.planner.plan.TableScanNode;
 import com.google.common.collect.Iterables;
 
 import java.util.List;
-import java.util.Map;
 import java.util.Optional;
 
 import static java.util.Objects.requireNonNull;
 
 /**
  * Converts delete followed immediately by table scan to a special metadata-only delete node
- *
+ * <p>
  * Turn
+ * <pre>
  *     TableCommit - Delete - TableScanNode (no node allowed in between except Exchanges)
+ * </pre>
  * into
+ * <pre>
  *     MetadataDelete
+ * </pre>
  */
 public class MetadataDeleteOptimizer
         implements PlanOptimizer
@@ -55,7 +58,7 @@ public class MetadataDeleteOptimizer
     }
 
     @Override
-    public PlanNode optimize(PlanNode plan, Session session, Map<Symbol, Type> types, SymbolAllocator symbolAllocator, PlanNodeIdAllocator idAllocator)
+    public PlanNode optimize(PlanNode plan, Session session, TypeProvider types, SymbolAllocator symbolAllocator, PlanNodeIdAllocator idAllocator, WarningCollector warningCollector)
     {
         return SimplePlanRewriter.rewriteWith(new Optimizer(session, metadata, idAllocator), plan, null);
     }
@@ -92,7 +95,7 @@ public class MetadataDeleteOptimizer
             return new MetadataDeleteNode(idAllocator.getNextId(), delete.get().getTarget(), Iterables.getOnlyElement(node.getOutputSymbols()), tableScanNode.getLayout().get());
         }
 
-        private <T> Optional<T> findNode(PlanNode source, Class<T> clazz)
+        private static <T> Optional<T> findNode(PlanNode source, Class<T> clazz)
         {
             while (true) {
                 // allow any chain of linear exchanges

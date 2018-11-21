@@ -13,117 +13,111 @@
  */
 package com.facebook.presto.spi.block;
 
-import io.airlift.slice.Slice;
-import io.airlift.slice.SliceOutput;
-import io.airlift.slice.Slices;
-
-import java.util.ArrayList;
-import java.util.List;
+import static com.facebook.presto.spi.block.ArrayBlock.createArrayBlockInternal;
+import static com.facebook.presto.spi.block.BlockUtil.checkArrayRange;
+import static com.facebook.presto.spi.block.BlockUtil.checkValidRegion;
+import static com.facebook.presto.spi.block.BlockUtil.compactArray;
+import static com.facebook.presto.spi.block.BlockUtil.compactOffsets;
 
 public abstract class AbstractArrayBlock
         implements Block
 {
-    protected abstract Block getValues();
+    protected abstract Block getRawElementBlock();
 
-    protected abstract Slice getOffsets();
+    protected abstract int[] getOffsets();
 
     protected abstract int getOffsetBase();
 
-    protected abstract Slice getValueIsNull();
+    protected abstract boolean[] getValueIsNull();
 
-    @Override
-    public BlockEncoding getEncoding()
+    int getOffset(int position)
     {
-        return new ArrayBlockEncoding(getValues().getEncoding());
-    }
-
-    private int getOffset(int position)
-    {
-        return position == 0 ? 0 : getOffsets().getInt((position - 1) * 4) - getOffsetBase();
+        return getOffsets()[position + getOffsetBase()];
     }
 
     @Override
-    public Block copyPositions(List<Integer> positions)
+    public String getEncodingName()
     {
-        SliceOutput newOffsets = Slices.allocate(positions.size() * Integer.BYTES).getOutput();
-        SliceOutput newValueIsNull = Slices.allocate(positions.size()).getOutput();
+        return ArrayBlockEncoding.NAME;
+    }
 
-        List<Integer> valuesPositions = new ArrayList<>();
-        int countNewOffset = 0;
-        for (int position : positions) {
+    @Override
+    public Block copyPositions(int[] positions, int offset, int length)
+    {
+        checkArrayRange(positions, offset, length);
+
+        int[] newOffsets = new int[length + 1];
+        boolean[] newValueIsNull = new boolean[length];
+
+        IntArrayList valuesPositions = new IntArrayList();
+        int newPosition = 0;
+        for (int i = offset; i < offset + length; ++i) {
+            int position = positions[i];
             if (isNull(position)) {
-                newValueIsNull.appendByte(1);
-                newOffsets.appendInt(countNewOffset);
+                newValueIsNull[newPosition] = true;
+                newOffsets[newPosition + 1] = newOffsets[newPosition];
             }
             else {
-                newValueIsNull.appendByte(0);
-                int positionStartOffset = getOffset(position);
-                int positionEndOffset = getOffset(position + 1);
-                countNewOffset += positionEndOffset - positionStartOffset;
-                newOffsets.appendInt(countNewOffset);
-                for (int j = positionStartOffset; j < positionEndOffset; j++) {
-                    valuesPositions.add(j);
+                int valuesStartOffset = getOffset(position);
+                int valuesEndOffset = getOffset(position + 1);
+                int valuesLength = valuesEndOffset - valuesStartOffset;
+
+                newOffsets[newPosition + 1] = newOffsets[newPosition] + valuesLength;
+
+                for (int elementIndex = valuesStartOffset; elementIndex < valuesEndOffset; elementIndex++) {
+                    valuesPositions.add(elementIndex);
                 }
             }
+            newPosition++;
         }
-        Block newValues = getValues().copyPositions(valuesPositions);
-        return new ArrayBlock(newValues, newOffsets.slice(), 0, newValueIsNull.slice());
+        Block newValues = getRawElementBlock().copyPositions(valuesPositions.elements(), 0, valuesPositions.size());
+        return createArrayBlockInternal(0, length, newValueIsNull, newOffsets, newValues);
     }
 
     @Override
     public Block getRegion(int position, int length)
     {
-        return getRegion(position, length, false);
+        int positionCount = getPositionCount();
+        checkValidRegion(positionCount, position, length);
+
+        return createArrayBlockInternal(
+                position + getOffsetBase(),
+                length,
+                getValueIsNull(),
+                getOffsets(),
+                getRawElementBlock());
+    }
+
+    @Override
+    public long getRegionSizeInBytes(int position, int length)
+    {
+        int positionCount = getPositionCount();
+        checkValidRegion(positionCount, position, length);
+
+        int valueStart = getOffsets()[getOffsetBase() + position];
+        int valueEnd = getOffsets()[getOffsetBase() + position + length];
+
+        return getRawElementBlock().getRegionSizeInBytes(valueStart, valueEnd - valueStart) + ((Integer.BYTES + Byte.BYTES) * (long) length);
     }
 
     @Override
     public Block copyRegion(int position, int length)
     {
-        return getRegion(position, length, true);
-    }
-
-    private Block getRegion(int position, int length, boolean compact)
-    {
         int positionCount = getPositionCount();
-        if (position < 0 || length < 0 || position + length > positionCount) {
-            throw new IndexOutOfBoundsException("Invalid position " + position + " in block with " + positionCount + " positions");
-        }
+        checkValidRegion(positionCount, position, length);
 
         int startValueOffset = getOffset(position);
         int endValueOffset = getOffset(position + length);
-        Block newValues;
-        Slice newOffsets;
-        Slice newValueIsNull;
-        int newOffsetBase;
-        if (compact) {
-            newValues = getValues().copyRegion(startValueOffset, endValueOffset - startValueOffset);
-            int[] newOffsetsArray = new int[length];
-            for (int i = 0; i < length; i++) {
-                newOffsetsArray[i] = getOffset(position + i + 1) - getOffset(position);
-            }
-            newOffsets = Slices.wrappedIntArray(newOffsetsArray);
-            newValueIsNull = Slices.copyOf(getValueIsNull(), position, length);
-            newOffsetBase = 0;
-        }
-        else {
-            if (position == 0 && length == positionCount) {
-                // It is incorrect to pull up this `if` because child blocks may be compact-able when this if condition is satisfied
-                return this;
-            }
-            else {
-                newValues = getValues().getRegion(startValueOffset, endValueOffset - startValueOffset);
-                newOffsets = getOffsets().slice(position * 4, length * 4);
-                newValueIsNull = getValueIsNull().slice(position, length);
-                newOffsetBase = startValueOffset + getOffsetBase();
-            }
-        }
-        return new ArrayBlock(newValues, newOffsets, newOffsetBase, newValueIsNull);
-    }
+        Block newValues = getRawElementBlock().copyRegion(startValueOffset, endValueOffset - startValueOffset);
 
-    @Override
-    public int getLength(int position)
-    {
-        return getOffset(position + 1) - getOffset(position);
+        int[] newOffsets = compactOffsets(getOffsets(), position + getOffsetBase(), length);
+        boolean[] valueIsNull = getValueIsNull();
+        boolean[] newValueIsNull = valueIsNull == null ? null : compactArray(valueIsNull, position + getOffsetBase(), length);
+
+        if (newValues == getRawElementBlock() && newOffsets == getOffsets() && newValueIsNull == valueIsNull) {
+            return this;
+        }
+        return createArrayBlockInternal(0, length, newValueIsNull, newOffsets, newValues);
     }
 
     @Override
@@ -136,91 +130,14 @@ public abstract class AbstractArrayBlock
 
         int startValueOffset = getOffset(position);
         int endValueOffset = getOffset(position + 1);
-        return clazz.cast(getValues().getRegion(startValueOffset, endValueOffset - startValueOffset));
+        return clazz.cast(getRawElementBlock().getRegion(startValueOffset, endValueOffset - startValueOffset));
     }
 
     @Override
     public void writePositionTo(int position, BlockBuilder blockBuilder)
     {
         checkReadablePosition(position);
-        BlockBuilder entryBuilder = blockBuilder.beginBlockEntry();
-        int startValueOffset = getOffset(position);
-        int endValueOffset = getOffset(position + 1);
-        for (int i = startValueOffset; i < endValueOffset; i++) {
-            if (getValues().isNull(i)) {
-                entryBuilder.appendNull();
-            }
-            else {
-                getValues().writePositionTo(i, entryBuilder);
-                entryBuilder.closeEntry();
-            }
-        }
-    }
-
-    @Override
-    public byte getByte(int position, int offset)
-    {
-        throw new UnsupportedOperationException();
-    }
-
-    @Override
-    public short getShort(int position, int offset)
-    {
-        throw new UnsupportedOperationException();
-    }
-
-    @Override
-    public int getInt(int position, int offset)
-    {
-        throw new UnsupportedOperationException();
-    }
-
-    @Override
-    public long getLong(int position, int offset)
-    {
-        throw new UnsupportedOperationException();
-    }
-
-    @Override
-    public Slice getSlice(int position, int offset, int length)
-    {
-        throw new UnsupportedOperationException();
-    }
-
-    @Override
-    public boolean equals(int position, int offset, Block otherBlock, int otherPosition, int otherOffset, int length)
-    {
-        throw new UnsupportedOperationException();
-    }
-
-    @Override
-    public boolean bytesEqual(int position, int offset, Slice otherSlice, int otherOffset, int length)
-    {
-        throw new UnsupportedOperationException();
-    }
-
-    @Override
-    public long hash(int position, int offset, int length)
-    {
-        throw new UnsupportedOperationException();
-    }
-
-    @Override
-    public int compareTo(int position, int offset, int length, Block otherBlock, int otherPosition, int otherOffset, int otherLength)
-    {
-        throw new UnsupportedOperationException();
-    }
-
-    @Override
-    public int bytesCompare(int position, int offset, int length, Slice otherSlice, int otherOffset, int otherLength)
-    {
-        throw new UnsupportedOperationException();
-    }
-
-    @Override
-    public void writeBytesTo(int position, int offset, int length, BlockBuilder blockBuilder)
-    {
-        throw new UnsupportedOperationException();
+        blockBuilder.appendStructureInternal(this, position);
     }
 
     @Override
@@ -229,23 +146,52 @@ public abstract class AbstractArrayBlock
         checkReadablePosition(position);
 
         int startValueOffset = getOffset(position);
+        int valueLength = getOffset(position + 1) - startValueOffset;
+        Block newValues = getRawElementBlock().copyRegion(startValueOffset, valueLength);
+
+        return createArrayBlockInternal(
+                0,
+                1,
+                new boolean[] {isNull(position)},
+                new int[] {0, valueLength},
+                newValues);
+    }
+
+    @Override
+    public long getEstimatedDataSizeForStats(int position)
+    {
+        checkReadablePosition(position);
+
+        if (isNull(position)) {
+            return 0;
+        }
+
+        int startValueOffset = getOffset(position);
         int endValueOffset = getOffset(position + 1);
 
-        Block newValues = getValues().copyRegion(startValueOffset, endValueOffset - startValueOffset);
-
-        // rewrite offsets so that baseOffset is always zero
-        Slice newOffsets = Slices.wrappedIntArray(endValueOffset - startValueOffset);
-
-        Slice newValueIsNull = Slices.copyOf(getValueIsNull(), position, 1);
-
-        return new ArrayBlock(newValues, newOffsets, 0, newValueIsNull);
+        Block rawElementBlock = getRawElementBlock();
+        long size = 0;
+        for (int i = startValueOffset; i < endValueOffset; i++) {
+            size += rawElementBlock.getEstimatedDataSizeForStats(i);
+        }
+        return size;
     }
 
     @Override
     public boolean isNull(int position)
     {
         checkReadablePosition(position);
-        return getValueIsNull().getByte(position) != 0;
+        boolean[] valueIsNull = getValueIsNull();
+        return valueIsNull == null ? false : valueIsNull[position + getOffsetBase()];
+    }
+
+    public <T> T apply(ArrayBlockFunction<T> function, int position)
+    {
+        checkReadablePosition(position);
+
+        int startValueOffset = getOffset(position);
+        int endValueOffset = getOffset(position + 1);
+        return function.apply(getRawElementBlock(), startValueOffset, endValueOffset - startValueOffset);
     }
 
     private void checkReadablePosition(int position)
@@ -253,5 +199,10 @@ public abstract class AbstractArrayBlock
         if (position < 0 || position >= getPositionCount()) {
             throw new IllegalArgumentException("position is not valid");
         }
+    }
+
+    public interface ArrayBlockFunction<T>
+    {
+        T apply(Block block, int startPosition, int length);
     }
 }

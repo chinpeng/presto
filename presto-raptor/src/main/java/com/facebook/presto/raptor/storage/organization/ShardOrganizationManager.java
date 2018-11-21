@@ -25,13 +25,13 @@ import com.google.common.collect.ComparisonChain;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Maps;
-import com.google.inject.Inject;
 import io.airlift.log.Logger;
 import io.airlift.units.Duration;
 import org.skife.jdbi.v2.IDBI;
 
 import javax.annotation.PostConstruct;
 import javax.annotation.PreDestroy;
+import javax.inject.Inject;
 
 import java.util.Collection;
 import java.util.HashSet;
@@ -41,11 +41,12 @@ import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import static com.facebook.presto.raptor.storage.organization.ShardOrganizerUtil.createOrganizationSet;
+import static com.facebook.presto.raptor.storage.organization.ShardOrganizerUtil.getOrganizationEligibleShards;
 import static com.facebook.presto.raptor.storage.organization.ShardOrganizerUtil.getShardsByDaysBuckets;
-import static com.facebook.presto.raptor.storage.organization.ShardOrganizerUtil.toShardIndexInfo;
 import static com.facebook.presto.raptor.util.DatabaseUtil.onDemandDao;
 import static com.google.common.collect.Sets.difference;
 import static com.google.common.collect.Sets.newConcurrentHashSet;
@@ -55,7 +56,6 @@ import static java.lang.Math.max;
 import static java.util.Objects.requireNonNull;
 import static java.util.concurrent.Executors.newScheduledThreadPool;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
-import static java.util.concurrent.TimeUnit.MINUTES;
 import static java.util.concurrent.TimeUnit.SECONDS;
 import static java.util.stream.Collectors.toList;
 import static java.util.stream.Collectors.toSet;
@@ -71,9 +71,11 @@ public class ShardOrganizationManager
     private final MetadataDao metadataDao;
     private final ShardOrganizerDao organizerDao;
     private final ShardManager shardManager;
+    private final TemporalFunction temporalFunction;
 
     private final boolean enabled;
     private final long organizationIntervalMillis;
+    private final long organizationDiscoveryIntervalMillis;
 
     private final String currentNodeIdentifier;
     private final ShardOrganizer organizer;
@@ -86,14 +88,17 @@ public class ShardOrganizationManager
             NodeManager nodeManager,
             ShardManager shardManager,
             ShardOrganizer organizer,
+            TemporalFunction temporalFunction,
             StorageManagerConfig config)
     {
         this(dbi,
                 nodeManager.getCurrentNode().getNodeIdentifier(),
                 shardManager,
                 organizer,
+                temporalFunction,
                 config.isOrganizationEnabled(),
-                config.getOrganizationInterval());
+                config.getOrganizationInterval(),
+                config.getOrganizationDiscoveryInterval());
     }
 
     public ShardOrganizationManager(
@@ -101,8 +106,10 @@ public class ShardOrganizationManager
             String currentNodeIdentifier,
             ShardManager shardManager,
             ShardOrganizer organizer,
+            TemporalFunction temporalFunction,
             boolean enabled,
-            Duration organizationInterval)
+            Duration organizationInterval,
+            Duration organizationDiscoveryInterval)
     {
         this.dbi = requireNonNull(dbi, "dbi is null");
         this.metadataDao = onDemandDao(dbi, MetadataDao.class);
@@ -111,11 +118,13 @@ public class ShardOrganizationManager
         this.organizer = requireNonNull(organizer, "organizer is null");
         this.shardManager = requireNonNull(shardManager, "shardManager is null");
         this.currentNodeIdentifier = requireNonNull(currentNodeIdentifier, "currentNodeIdentifier is null");
+        this.temporalFunction = requireNonNull(temporalFunction, "temporalFunction is null");
 
         this.enabled = enabled;
 
         requireNonNull(organizationInterval, "organizationInterval is null");
         this.organizationIntervalMillis = max(1, organizationInterval.roundTo(MILLISECONDS));
+        this.organizationDiscoveryIntervalMillis = max(1, organizationDiscoveryInterval.roundTo(MILLISECONDS));
     }
 
     @PostConstruct
@@ -138,8 +147,8 @@ public class ShardOrganizationManager
     {
         discoveryService.scheduleWithFixedDelay(() -> {
             try {
-                // jitter to avoid overloading database
-                SECONDS.sleep(ThreadLocalRandom.current().nextLong(1, 5 * 60));
+                // jitter to avoid overloading database and overloading the backup store
+                SECONDS.sleep(ThreadLocalRandom.current().nextLong(1, organizationDiscoveryIntervalMillis));
 
                 log.info("Running shard organizer...");
                 submitJobs(discoverAndInitializeTablesToOrganize());
@@ -150,7 +159,7 @@ public class ShardOrganizationManager
             catch (Throwable t) {
                 log.error(t, "Error running shard organizer");
             }
-        }, 0, 5, MINUTES);
+        }, 0, organizationDiscoveryIntervalMillis, TimeUnit.MILLISECONDS);
     }
 
     @VisibleForTesting
@@ -188,8 +197,8 @@ public class ShardOrganizationManager
                 .filter(shard -> !organizer.inProgress(shard.getShardUuid()))
                 .collect(toSet());
 
-        Collection<ShardIndexInfo> indexInfos = toShardIndexInfo(dbi, metadataDao, tableInfo, filteredShards, true);
-        Set<OrganizationSet> organizationSets = createOrganizationSets(tableInfo, indexInfos);
+        Collection<ShardIndexInfo> indexInfos = getOrganizationEligibleShards(dbi, metadataDao, tableInfo, filteredShards, true);
+        Set<OrganizationSet> organizationSets = createOrganizationSets(temporalFunction, tableInfo, indexInfos);
 
         if (organizationSets.isEmpty()) {
             return;
@@ -226,12 +235,12 @@ public class ShardOrganizationManager
     }
 
     @VisibleForTesting
-    static Set<OrganizationSet> createOrganizationSets(Table tableInfo, Collection<ShardIndexInfo> shards)
+    static Set<OrganizationSet> createOrganizationSets(TemporalFunction temporalFunction, Table tableInfo, Collection<ShardIndexInfo> shards)
     {
-        return getShardsByDaysBuckets(tableInfo, shards).stream()
-            .map(indexInfos -> getOverlappingOrganizationSets(tableInfo, indexInfos))
-            .flatMap(Collection::stream)
-            .collect(toSet());
+        return getShardsByDaysBuckets(tableInfo, shards, temporalFunction).stream()
+                .map(indexInfos -> getOverlappingOrganizationSets(tableInfo, indexInfos))
+                .flatMap(Collection::stream)
+                .collect(toSet());
     }
 
     private static Set<OrganizationSet> getOverlappingOrganizationSets(Table tableInfo, Collection<ShardIndexInfo> shards)
@@ -243,11 +252,11 @@ public class ShardOrganizationManager
         // Sort by low marker for the range
         List<ShardIndexInfo> sortedShards = shards.stream()
                 .sorted((o1, o2) -> {
-                    ShardRange shardRange1 = o1.getSortRange().get();
-                    ShardRange shardRange2 = o2.getSortRange().get();
+                    ShardRange sortRange1 = o1.getSortRange().get();
+                    ShardRange sortRange2 = o2.getSortRange().get();
                     return ComparisonChain.start()
-                            .compare(shardRange1.getMinTuple(), shardRange2.getMinTuple())
-                            .compare(shardRange2.getMaxTuple(), shardRange1.getMaxTuple())
+                            .compare(sortRange1.getMinTuple(), sortRange2.getMinTuple())
+                            .compare(sortRange2.getMaxTuple(), sortRange1.getMaxTuple())
                             .result();
                 })
                 .collect(toList());
@@ -259,12 +268,12 @@ public class ShardOrganizationManager
         int previousRange = 0;
         int nextRange = previousRange + 1;
         while (nextRange < sortedShards.size()) {
-            ShardRange shardRange1 = sortedShards.get(previousRange).getSortRange().get();
-            ShardRange shardRange2 = sortedShards.get(nextRange).getSortRange().get();
+            ShardRange sortRange1 = sortedShards.get(previousRange).getSortRange().get();
+            ShardRange sortRange2 = sortedShards.get(nextRange).getSortRange().get();
 
-            if (shardRange1.overlaps(shardRange2) && !shardRange1.adjacent(shardRange2)) {
+            if (sortRange1.overlaps(sortRange2) && !sortRange1.adjacent(sortRange2)) {
                 builder.add(sortedShards.get(nextRange));
-                if (!shardRange1.encloses(shardRange2)) {
+                if (!sortRange1.encloses(sortRange2)) {
                     previousRange = nextRange;
                 }
             }

@@ -13,46 +13,37 @@
  */
 package com.facebook.presto.hive;
 
+import com.facebook.presto.testing.MaterializedResult;
 import com.facebook.presto.tests.AbstractTestDistributedQueries;
+import org.testng.annotations.Test;
 
 import static com.facebook.presto.hive.HiveQueryRunner.createQueryRunner;
-import static com.facebook.presto.hive.HiveQueryRunner.createSampledSession;
+import static com.facebook.presto.sql.tree.ExplainType.Type.LOGICAL;
+import static com.google.common.collect.Iterables.getOnlyElement;
 import static io.airlift.tpch.TpchTable.getTables;
+import static org.testng.Assert.assertEquals;
 
 public class TestHiveDistributedQueries
         extends AbstractTestDistributedQueries
 {
     public TestHiveDistributedQueries()
-            throws Exception
     {
-        super(createQueryRunner(getTables()), createSampledSession());
+        super(() -> createQueryRunner(getTables()));
     }
 
     @Override
     public void testDelete()
-            throws Exception
     {
         // Hive connector currently does not support row-by-row delete
     }
 
-    @Override
-    public void testAddColumn()
-            throws Exception
+    @Test
+    public void testExplainOfCreateTableAs()
     {
-        // Hive connector currently does not support schema change
+        String query = "CREATE TABLE copy_orders AS SELECT * FROM orders";
+        MaterializedResult result = computeActual("EXPLAIN " + query);
+        assertEquals(getOnlyElement(result.getOnlyColumnAsSet()), getExplainPlan(query, LOGICAL));
     }
 
-    @Override
-    public void testRenameColumn()
-            throws Exception
-    {
-        // Hive connector currently does not support schema change
-    }
-
-    @Override
-    public void testRenameTable()
-            throws Exception
-    {
-        // Hive connector currently does not support table rename
-    }
+    // Hive specific tests should normally go in TestHiveIntegrationSmokeTest
 }

@@ -26,6 +26,24 @@
     </artifactSet>
 
     <!-- Plugins -->
+    <artifactSet to="plugin/resource-group-managers">
+        <artifact id="${project.groupId}:presto-resource-group-managers:zip:${project.version}">
+            <unpack />
+        </artifact>
+    </artifactSet>
+
+    <artifactSet to="plugin/password-authenticators">
+        <artifact id="${project.groupId}:presto-password-authenticators:zip:${project.version}">
+            <unpack />
+        </artifact>
+    </artifactSet>
+
+    <artifactSet to="plugin/session-property-managers">
+        <artifact id="${project.groupId}:presto-session-property-managers:zip:${project.version}">
+            <unpack />
+        </artifact>
+    </artifactSet>
+
     <artifactSet to="plugin/jmx">
         <artifact id="${project.groupId}:presto-jmx:zip:${project.version}">
             <unpack />
@@ -44,26 +62,14 @@
         </artifact>
     </artifactSet>
 
-    <artifactSet to="plugin/hive-cdh4">
-        <artifact id="${project.groupId}:presto-hive-cdh4:zip:${project.version}">
-            <unpack />
-        </artifact>
-    </artifactSet>
-
-    <artifactSet to="plugin/hive-cdh5">
-        <artifact id="${project.groupId}:presto-hive-cdh5:zip:${project.version}">
-            <unpack />
-        </artifact>
-    </artifactSet>
-
-    <artifactSet to="plugin/hive-hadoop1">
-        <artifact id="${project.groupId}:presto-hive-hadoop1:zip:${project.version}">
-            <unpack />
-        </artifact>
-    </artifactSet>
-
     <artifactSet to="plugin/hive-hadoop2">
         <artifact id="${project.groupId}:presto-hive-hadoop2:zip:${project.version}">
+            <unpack />
+        </artifact>
+    </artifactSet>
+
+    <artifactSet to="plugin/memory">
+        <artifact id="${project.groupId}:presto-memory:zip:${project.version}">
             <unpack />
         </artifact>
     </artifactSet>
@@ -80,6 +86,12 @@
         </artifact>
     </artifactSet>
 
+    <artifactSet to="plugin/kudu">
+        <artifact id="${project.groupId}:presto-kudu:zip:${project.version}">
+            <unpack />
+        </artifact>
+    </artifactSet>
+
     <artifactSet to="plugin/atop">
         <artifact id="${project.groupId}:presto-atop:zip:${project.version}">
             <unpack />
@@ -92,6 +104,12 @@
         </artifact>
     </artifactSet>
 
+    <artifactSet to="plugin/geospatial">
+        <artifact id="${project.groupId}:presto-geospatial:zip:${project.version}">
+            <unpack />
+        </artifact>
+    </artifactSet>
+
     <artifactSet to="plugin/mysql">
         <artifact id="${project.groupId}:presto-mysql:zip:${project.version}">
             <unpack />
@@ -100,6 +118,18 @@
 
     <artifactSet to="plugin/postgresql">
         <artifact id="${project.groupId}:presto-postgresql:zip:${project.version}">
+            <unpack />
+        </artifact>
+    </artifactSet>
+
+    <artifactSet to="plugin/redshift">
+        <artifact id="${project.groupId}:presto-redshift:zip:${project.version}">
+            <unpack />
+        </artifact>
+    </artifactSet>
+
+    <artifactSet to="plugin/sqlserver">
+        <artifact id="${project.groupId}:presto-sqlserver:zip:${project.version}">
             <unpack />
         </artifact>
     </artifactSet>
@@ -122,6 +152,12 @@
         </artifact>
     </artifactSet>
 
+    <artifactSet to="plugin/tpcds">
+        <artifact id="${project.groupId}:presto-tpcds:zip:${project.version}">
+            <unpack />
+        </artifact>
+    </artifactSet>
+
     <artifactSet to="plugin/teradata-functions">
         <artifact id="${project.groupId}:presto-teradata-functions:zip:${project.version}">
             <unpack />
@@ -136,6 +172,18 @@
 
     <artifactSet to="plugin/localfile">
         <artifact id="${project.groupId}:presto-local-file:zip:${project.version}">
+            <unpack />
+        </artifact>
+    </artifactSet>
+
+    <artifactSet to="plugin/accumulo">
+        <artifact id="${project.groupId}:presto-accumulo:zip:${project.version}">
+            <unpack />
+        </artifact>
+    </artifactSet>
+
+    <artifactSet to="plugin/presto-thrift">
+        <artifact id="${project.groupId}:presto-thrift-connector:zip:${project.version}">
             <unpack />
         </artifact>
     </artifactSet>

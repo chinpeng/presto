@@ -15,7 +15,6 @@ package com.facebook.presto.operator.aggregation;
 
 import com.facebook.presto.spi.block.Block;
 import com.facebook.presto.spi.block.BlockBuilder;
-import com.facebook.presto.spi.block.BlockBuilderStatus;
 import org.testng.annotations.Test;
 
 import java.util.ArrayList;
@@ -70,15 +69,15 @@ public class TestTypedHeap
                 IntStream.range(0, OUTPUT_SIZE).map(x -> OUTPUT_SIZE - 1 - x).iterator());
     }
 
-    private void test(IntStream inputStream, BlockComparator comparator, PrimitiveIterator.OfInt outputIterator)
+    private static void test(IntStream inputStream, BlockComparator comparator, PrimitiveIterator.OfInt outputIterator)
     {
-        BlockBuilder blockBuilder = BIGINT.createBlockBuilder(new BlockBuilderStatus(), INPUT_SIZE);
+        BlockBuilder blockBuilder = BIGINT.createBlockBuilder(null, INPUT_SIZE);
         inputStream.forEach(x -> BIGINT.writeLong(blockBuilder, x));
 
         TypedHeap heap = new TypedHeap(comparator, BIGINT, OUTPUT_SIZE);
         heap.addAll(blockBuilder);
 
-        BlockBuilder resultBlockBuilder = BIGINT.createBlockBuilder(new BlockBuilderStatus(), OUTPUT_SIZE);
+        BlockBuilder resultBlockBuilder = BIGINT.createBlockBuilder(null, OUTPUT_SIZE);
         heap.popAll(resultBlockBuilder);
 
         Block resultBlock = resultBlockBuilder.build();

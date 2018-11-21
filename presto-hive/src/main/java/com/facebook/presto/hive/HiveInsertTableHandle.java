@@ -13,6 +13,7 @@
  */
 package com.facebook.presto.hive;
 
+import com.facebook.presto.hive.metastore.HivePageSinkMetadata;
 import com.facebook.presto.spi.ConnectorInsertTableHandle;
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
@@ -26,22 +27,22 @@ public class HiveInsertTableHandle
 {
     @JsonCreator
     public HiveInsertTableHandle(
-            @JsonProperty("clientId") String clientId,
             @JsonProperty("schemaName") String schemaName,
             @JsonProperty("tableName") String tableName,
             @JsonProperty("inputColumns") List<HiveColumnHandle> inputColumns,
             @JsonProperty("filePrefix") String filePrefix,
+            @JsonProperty("pageSinkMetadata") HivePageSinkMetadata pageSinkMetadata,
             @JsonProperty("locationHandle") LocationHandle locationHandle,
             @JsonProperty("bucketProperty") Optional<HiveBucketProperty> bucketProperty,
             @JsonProperty("tableStorageFormat") HiveStorageFormat tableStorageFormat,
             @JsonProperty("partitionStorageFormat") HiveStorageFormat partitionStorageFormat)
     {
         super(
-                clientId,
                 schemaName,
                 tableName,
                 inputColumns,
                 filePrefix,
+                pageSinkMetadata,
                 locationHandle,
                 bucketProperty,
                 tableStorageFormat,

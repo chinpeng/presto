@@ -26,6 +26,7 @@ import com.facebook.presto.spi.ConnectorTableLayoutHandle;
 import com.facebook.presto.spi.HostAddress;
 import com.facebook.presto.spi.Node;
 import com.facebook.presto.spi.PrestoException;
+import com.facebook.presto.spi.connector.ConnectorPartitionHandle;
 import com.facebook.presto.spi.connector.ConnectorSplitManager;
 import com.facebook.presto.spi.connector.ConnectorTransactionHandle;
 import com.facebook.presto.spi.predicate.TupleDomain;
@@ -49,7 +50,6 @@ import java.util.function.Supplier;
 
 import static com.facebook.presto.raptor.RaptorErrorCode.RAPTOR_NO_HOST_FOR_SHARD;
 import static com.facebook.presto.raptor.RaptorSessionProperties.getOneSplitPerBucketThreshold;
-import static com.facebook.presto.raptor.util.Types.checkType;
 import static com.facebook.presto.spi.StandardErrorCode.NO_NODES_AVAILABLE;
 import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.base.Verify.verify;
@@ -93,9 +93,9 @@ public class RaptorSplitManager
     }
 
     @Override
-    public ConnectorSplitSource getSplits(ConnectorTransactionHandle transaction, ConnectorSession session, ConnectorTableLayoutHandle layout)
+    public ConnectorSplitSource getSplits(ConnectorTransactionHandle transaction, ConnectorSession session, ConnectorTableLayoutHandle layout, SplitSchedulingStrategy splitSchedulingStrategy)
     {
-        RaptorTableLayoutHandle handle = checkType(layout, RaptorTableLayoutHandle.class, "layout");
+        RaptorTableLayoutHandle handle = (RaptorTableLayoutHandle) layout;
         RaptorTableHandle table = handle.getTable();
         TupleDomain<RaptorColumnHandle> effectivePredicate = toRaptorTupleDomain(handle.getConstraint());
         long tableId = table.getTableId();
@@ -122,7 +122,7 @@ public class RaptorSplitManager
     @SuppressWarnings("unchecked")
     private static TupleDomain<RaptorColumnHandle> toRaptorTupleDomain(TupleDomain<ColumnHandle> tupleDomain)
     {
-        return tupleDomain.transform(handle -> checkType(handle, RaptorColumnHandle.class, "columnHandle"));
+        return tupleDomain.transform(handle -> (RaptorColumnHandle) handle);
     }
 
     private static <T> T selectRandom(Iterable<T> elements)
@@ -142,7 +142,7 @@ public class RaptorSplitManager
         private final ResultIterator<BucketShards> iterator;
 
         @GuardedBy("this")
-        private CompletableFuture<List<ConnectorSplit>> future;
+        private CompletableFuture<ConnectorSplitBatch> future;
 
         public RaptorSplitSource(
                 long tableId,
@@ -167,7 +167,7 @@ public class RaptorSplitManager
         }
 
         @Override
-        public synchronized CompletableFuture<List<ConnectorSplit>> getNextBatch(int maxSize)
+        public CompletableFuture<ConnectorSplitBatch> getNextBatch(ConnectorPartitionHandle partitionHandle, int maxSize)
         {
             checkState((future == null) || future.isDone(), "previous batch not completed");
             future = supplyAsync(batchSupplier(maxSize), executor);
@@ -190,7 +190,7 @@ public class RaptorSplitManager
             return !iterator.hasNext();
         }
 
-        private Supplier<List<ConnectorSplit>> batchSupplier(int maxSize)
+        private Supplier<ConnectorSplitBatch> batchSupplier(int maxSize)
         {
             return () -> {
                 ImmutableList.Builder<ConnectorSplit> list = ImmutableList.builder();
@@ -203,7 +203,7 @@ public class RaptorSplitManager
                     }
                     list.add(createSplit(iterator.next()));
                 }
-                return list.build();
+                return new ConnectorSplitBatch(list.build(), isFinished());
             };
         }
 
@@ -231,7 +231,7 @@ public class RaptorSplitManager
                     throw new PrestoException(NO_NODES_AVAILABLE, "No nodes available to run query");
                 }
                 Node node = selectRandom(availableNodes);
-                shardManager.assignShard(tableId, shardId, node.getNodeIdentifier(), true);
+                shardManager.replaceShardAssignment(tableId, shardId, node.getNodeIdentifier(), true);
                 addresses = ImmutableList.of(node.getHostAndPort());
             }
 

@@ -15,7 +15,6 @@ package com.facebook.presto.spi.classloader;
 
 import com.facebook.presto.spi.ConnectorPageSink;
 import com.facebook.presto.spi.Page;
-import com.facebook.presto.spi.block.Block;
 import io.airlift.slice.Slice;
 
 import java.util.Collection;
@@ -36,15 +35,39 @@ public class ClassLoaderSafeConnectorPageSink
     }
 
     @Override
-    public CompletableFuture<?> appendPage(Page page, Block sampleWeightBlock)
+    public long getCompletedBytes()
     {
         try (ThreadContextClassLoader ignored = new ThreadContextClassLoader(classLoader)) {
-            return delegate.appendPage(page, sampleWeightBlock);
+            return delegate.getCompletedBytes();
         }
     }
 
     @Override
-    public Collection<Slice> finish()
+    public long getSystemMemoryUsage()
+    {
+        try (ThreadContextClassLoader ignored = new ThreadContextClassLoader(classLoader)) {
+            return delegate.getSystemMemoryUsage();
+        }
+    }
+
+    @Override
+    public long getValidationCpuNanos()
+    {
+        try (ThreadContextClassLoader ignored = new ThreadContextClassLoader(classLoader)) {
+            return delegate.getValidationCpuNanos();
+        }
+    }
+
+    @Override
+    public CompletableFuture<?> appendPage(Page page)
+    {
+        try (ThreadContextClassLoader ignored = new ThreadContextClassLoader(classLoader)) {
+            return delegate.appendPage(page);
+        }
+    }
+
+    @Override
+    public CompletableFuture<Collection<Slice>> finish()
     {
         try (ThreadContextClassLoader ignored = new ThreadContextClassLoader(classLoader)) {
             return delegate.finish();

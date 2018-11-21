@@ -14,7 +14,7 @@
 package com.facebook.presto.testing;
 
 import com.facebook.presto.metadata.BoundVariables;
-import com.facebook.presto.operator.aggregation.AggregationCompiler;
+import com.facebook.presto.operator.aggregation.AggregationFromAnnotationsParser;
 import com.facebook.presto.operator.aggregation.InternalAggregationFunction;
 import com.facebook.presto.spi.type.TypeManager;
 import com.facebook.presto.spi.type.TypeSignature;
@@ -30,12 +30,6 @@ public class AggregationTestUtils
     }
 
     @VisibleForTesting
-    public static InternalAggregationFunction generateInternalAggregationFunction(Class<?> clazz)
-    {
-        return AggregationCompiler.generateAggregationBindableFunction(clazz).specialize(BoundVariables.builder().build(), 0, new TypeRegistry());
-    }
-
-    @VisibleForTesting
     public static InternalAggregationFunction generateInternalAggregationFunction(Class<?> clazz, TypeSignature outputType, List<TypeSignature> inputTypes)
     {
         return generateInternalAggregationFunction(clazz, outputType, inputTypes, new TypeRegistry());
@@ -44,12 +38,12 @@ public class AggregationTestUtils
     @VisibleForTesting
     public static InternalAggregationFunction generateInternalAggregationFunction(Class<?> clazz, TypeSignature outputType, List<TypeSignature> inputTypes, TypeManager typeManager)
     {
-        return generateInternalAggregationFunction(clazz, outputType, inputTypes, typeManager, BoundVariables.builder().build(), 0);
+        return generateInternalAggregationFunction(clazz, outputType, inputTypes, typeManager, BoundVariables.builder().build(), inputTypes.size());
     }
 
     @VisibleForTesting
     public static InternalAggregationFunction generateInternalAggregationFunction(Class<?> clazz, TypeSignature outputType, List<TypeSignature> inputTypes, TypeManager typeManager, BoundVariables boundVariables, int arity)
     {
-        return AggregationCompiler.generateAggregationBindableFunction(clazz, outputType, inputTypes).specialize(boundVariables, arity, typeManager);
+        return AggregationFromAnnotationsParser.parseFunctionDefinitionWithTypesConstraint(clazz, outputType, inputTypes).specialize(boundVariables, arity, typeManager);
     }
 }

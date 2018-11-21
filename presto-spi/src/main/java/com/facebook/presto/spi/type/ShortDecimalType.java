@@ -11,7 +11,6 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 package com.facebook.presto.spi.type;
 
 import com.facebook.presto.spi.ConnectorSession;
@@ -19,6 +18,7 @@ import com.facebook.presto.spi.block.Block;
 import com.facebook.presto.spi.block.BlockBuilder;
 import com.facebook.presto.spi.block.BlockBuilderStatus;
 import com.facebook.presto.spi.block.LongArrayBlockBuilder;
+import com.facebook.presto.spi.block.PageBuilderStatus;
 
 import java.math.BigInteger;
 
@@ -43,9 +43,16 @@ final class ShortDecimalType
     @Override
     public BlockBuilder createBlockBuilder(BlockBuilderStatus blockBuilderStatus, int expectedEntries, int expectedBytesPerEntry)
     {
+        int maxBlockSizeInBytes;
+        if (blockBuilderStatus == null) {
+            maxBlockSizeInBytes = PageBuilderStatus.DEFAULT_MAX_PAGE_SIZE_IN_BYTES;
+        }
+        else {
+            maxBlockSizeInBytes = blockBuilderStatus.getMaxPageSizeInBytes();
+        }
         return new LongArrayBlockBuilder(
                 blockBuilderStatus,
-                Math.min(expectedEntries, blockBuilderStatus.getMaxBlockSizeInBytes() / getFixedSize()));
+                Math.min(expectedEntries, maxBlockSizeInBytes / getFixedSize()));
     }
 
     @Override
@@ -57,7 +64,7 @@ final class ShortDecimalType
     @Override
     public BlockBuilder createFixedSizeBlockBuilder(int positionCount)
     {
-        return new LongArrayBlockBuilder(new BlockBuilderStatus(), positionCount);
+        return new LongArrayBlockBuilder(null, positionCount);
     }
 
     @Override

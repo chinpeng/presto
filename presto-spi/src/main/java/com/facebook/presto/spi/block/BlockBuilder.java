@@ -23,7 +23,7 @@ public interface BlockBuilder
      */
     default BlockBuilder writeByte(int value)
     {
-        throw new UnsupportedOperationException();
+        throw new UnsupportedOperationException(getClass().getName());
     }
 
     /**
@@ -31,7 +31,7 @@ public interface BlockBuilder
      */
     default BlockBuilder writeShort(int value)
     {
-        throw new UnsupportedOperationException();
+        throw new UnsupportedOperationException(getClass().getName());
     }
 
     /**
@@ -39,7 +39,7 @@ public interface BlockBuilder
      */
     default BlockBuilder writeInt(int value)
     {
-        throw new UnsupportedOperationException();
+        throw new UnsupportedOperationException(getClass().getName());
     }
 
     /**
@@ -47,7 +47,7 @@ public interface BlockBuilder
      */
     default BlockBuilder writeLong(long value)
     {
-        throw new UnsupportedOperationException();
+        throw new UnsupportedOperationException(getClass().getName());
     }
 
     /**
@@ -55,15 +55,7 @@ public interface BlockBuilder
      */
     default BlockBuilder writeBytes(Slice source, int sourceIndex, int length)
     {
-        throw new UnsupportedOperationException();
-    }
-
-    /**
-     * Write an object to the current entry;
-     */
-    default BlockBuilder writeObject(Object value)
-    {
-        throw new UnsupportedOperationException();
+        throw new UnsupportedOperationException(getClass().getName());
     }
 
     /**
@@ -72,7 +64,16 @@ public interface BlockBuilder
      */
     default BlockBuilder beginBlockEntry()
     {
-        throw new UnsupportedOperationException();
+        throw new UnsupportedOperationException(getClass().getName());
+    }
+
+    /**
+     * Create a new block from the current materialized block by keeping the same elements
+     * only with respect to {@code visiblePositions}.
+     */
+    default Block getPositions(int[] visiblePositions, int offset, int length)
+    {
+        return build().getPositions(visiblePositions, offset, length);
     }
 
     /**
@@ -86,12 +87,29 @@ public interface BlockBuilder
     BlockBuilder appendNull();
 
     /**
+     * Append a struct to the block and close the entry.
+     */
+    default BlockBuilder appendStructure(Block value)
+    {
+        throw new UnsupportedOperationException(getClass().getName());
+    }
+
+    /**
+     * Do not use this interface outside block package.
+     * Instead, use Block.writePositionTo(BlockBuilder, position)
+     */
+    default BlockBuilder appendStructureInternal(Block block, int position)
+    {
+        throw new UnsupportedOperationException(getClass().getName());
+    }
+
+    /**
      * Builds the block. This method can be called multiple times.
      */
     Block build();
 
     /**
-     * Resets the block builder, clearing all of the data.
+     * Creates a new block builder of the same type based on the current usage statistics of this block builder.
      */
-    void reset(BlockBuilderStatus blockBuilderStatus);
+    BlockBuilder newBlockBuilderLike(BlockBuilderStatus blockBuilderStatus);
 }

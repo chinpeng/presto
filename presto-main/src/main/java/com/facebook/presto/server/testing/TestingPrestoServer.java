@@ -13,13 +13,20 @@
  */
 package com.facebook.presto.server.testing;
 
+import com.facebook.presto.connector.ConnectorId;
 import com.facebook.presto.connector.ConnectorManager;
+import com.facebook.presto.cost.StatsCalculator;
+import com.facebook.presto.eventlistener.EventListenerManager;
+import com.facebook.presto.execution.QueryInfo;
 import com.facebook.presto.execution.QueryManager;
+import com.facebook.presto.execution.SqlQueryManager;
+import com.facebook.presto.execution.StateMachine.StateChangeListener;
 import com.facebook.presto.execution.TaskManager;
-import com.facebook.presto.execution.resourceGroups.ResourceGroupManager;
+import com.facebook.presto.execution.resourceGroups.InternalResourceGroupManager;
 import com.facebook.presto.memory.ClusterMemoryManager;
 import com.facebook.presto.memory.LocalMemoryManager;
 import com.facebook.presto.metadata.AllNodes;
+import com.facebook.presto.metadata.CatalogManager;
 import com.facebook.presto.metadata.InternalNodeManager;
 import com.facebook.presto.metadata.Metadata;
 import com.facebook.presto.security.AccessControl;
@@ -28,21 +35,27 @@ import com.facebook.presto.server.GracefulShutdownHandler;
 import com.facebook.presto.server.PluginManager;
 import com.facebook.presto.server.ServerMainModule;
 import com.facebook.presto.server.ShutdownAction;
+import com.facebook.presto.server.security.ServerSecurityModule;
 import com.facebook.presto.spi.Node;
 import com.facebook.presto.spi.Plugin;
+import com.facebook.presto.spi.QueryId;
+import com.facebook.presto.split.PageSourceManager;
 import com.facebook.presto.split.SplitManager;
-import com.facebook.presto.sql.analyzer.FeaturesConfig;
 import com.facebook.presto.sql.parser.SqlParserOptions;
+import com.facebook.presto.sql.planner.NodePartitioningManager;
+import com.facebook.presto.sql.planner.Plan;
 import com.facebook.presto.testing.ProcedureTester;
 import com.facebook.presto.testing.TestingAccessControlManager;
+import com.facebook.presto.testing.TestingEventListenerManager;
+import com.facebook.presto.testing.TestingWarningCollectorModule;
 import com.facebook.presto.transaction.TransactionManager;
 import com.google.common.base.Joiner;
 import com.google.common.base.Splitter;
-import com.google.common.base.Throwables;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.net.HostAndPort;
 import com.google.inject.Injector;
+import com.google.inject.Key;
 import com.google.inject.Module;
 import com.google.inject.Scopes;
 import io.airlift.bootstrap.Bootstrap;
@@ -65,6 +78,7 @@ import org.weakref.jmx.guice.MBeanModule;
 import javax.annotation.concurrent.GuardedBy;
 
 import java.io.Closeable;
+import java.io.IOException;
 import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -77,34 +91,42 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 
-import static com.facebook.presto.server.testing.FileUtils.deleteRecursively;
 import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.base.Strings.nullToEmpty;
+import static com.google.common.base.Throwables.throwIfUnchecked;
+import static com.google.common.io.MoreFiles.deleteRecursively;
+import static com.google.common.io.RecursiveDeleteOption.ALLOW_INSECURE;
 import static io.airlift.discovery.client.ServiceAnnouncement.serviceAnnouncement;
 import static java.lang.Integer.parseInt;
+import static java.nio.file.Files.isDirectory;
 import static java.util.Objects.requireNonNull;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
 
 public class TestingPrestoServer
         implements Closeable
 {
+    private final Injector injector;
     private final Path baseDataDir;
     private final LifeCycleManager lifeCycleManager;
     private final PluginManager pluginManager;
     private final ConnectorManager connectorManager;
     private final TestingHttpServer server;
+    private final CatalogManager catalogManager;
     private final TransactionManager transactionManager;
     private final Metadata metadata;
+    private final StatsCalculator statsCalculator;
     private final TestingAccessControlManager accessControl;
     private final ProcedureTester procedureTester;
-    private final Optional<ResourceGroupManager> resourceGroupManager;
+    private final Optional<InternalResourceGroupManager> resourceGroupManager;
     private final SplitManager splitManager;
+    private final PageSourceManager pageSourceManager;
+    private final NodePartitioningManager nodePartitioningManager;
     private final ClusterMemoryManager clusterMemoryManager;
     private final LocalMemoryManager localMemoryManager;
     private final InternalNodeManager nodeManager;
     private final ServiceSelectorManager serviceSelectorManager;
     private final Announcer announcer;
-    private final QueryManager queryManager;
+    private final SqlQueryManager queryManager;
     private final TaskManager taskManager;
     private final GracefulShutdownHandler gracefulShutdownHandler;
     private final ShutdownAction shutdownAction;
@@ -140,16 +162,21 @@ public class TestingPrestoServer
     public TestingPrestoServer()
             throws Exception
     {
-        this(ImmutableList.<Module>of());
+        this(ImmutableList.of());
     }
 
     public TestingPrestoServer(List<Module> additionalModules)
             throws Exception
     {
-        this(true, ImmutableMap.<String, String>of(), null, null, additionalModules);
+        this(true, ImmutableMap.of(), null, null, new SqlParserOptions(), additionalModules);
     }
 
-    public TestingPrestoServer(boolean coordinator, Map<String, String> properties, String environment, URI discoveryUri, List<Module> additionalModules)
+    public TestingPrestoServer(boolean coordinator,
+            Map<String, String> properties,
+            String environment,
+            URI discoveryUri,
+            SqlParserOptions parserOptions,
+            List<Module> additionalModules)
             throws Exception
     {
         this.coordinator = coordinator;
@@ -165,15 +192,9 @@ public class TestingPrestoServer
                 .putAll(properties)
                 .put("coordinator", String.valueOf(coordinator))
                 .put("presto.version", "testversion")
-                .put("http-client.max-threads", "16")
                 .put("task.concurrency", "4")
                 .put("task.max-worker-threads", "4")
-                .put("exchange.client-threads", "4")
-                .put("analyzer.experimental-syntax-enabled", "true");
-
-        if (!properties.containsKey("query.max-memory-per-node")) {
-            serverProperties.put("query.max-memory-per-node", "512MB");
-        }
+                .put("exchange.client-threads", "4");
 
         if (coordinator) {
             // TODO: enable failure detector
@@ -189,10 +210,14 @@ public class TestingPrestoServer
                 .add(new TestingJmxModule())
                 .add(new EventModule())
                 .add(new TraceTokenModule())
-                .add(new ServerMainModule(new SqlParserOptions()))
+                .add(new ServerSecurityModule())
+                .add(new ServerMainModule(parserOptions))
+                .add(new TestingWarningCollectorModule())
                 .add(binder -> {
                     binder.bind(TestingAccessControlManager.class).in(Scopes.SINGLETON);
+                    binder.bind(TestingEventListenerManager.class).in(Scopes.SINGLETON);
                     binder.bind(AccessControlManager.class).to(TestingAccessControlManager.class).in(Scopes.SINGLETON);
+                    binder.bind(EventListenerManager.class).to(TestingEventListenerManager.class).in(Scopes.SINGLETON);
                     binder.bind(AccessControl.class).to(AccessControlManager.class).in(Scopes.SINGLETON);
                     binder.bind(ShutdownAction.class).to(TestShutdownAction.class).in(Scopes.SINGLETON);
                     binder.bind(GracefulShutdownHandler.class).in(Scopes.SINGLETON);
@@ -217,41 +242,48 @@ public class TestingPrestoServer
             optionalProperties.put("node.environment", environment);
         }
 
-        Injector injector = app
+        injector = app
                 .strictConfig()
                 .doNotInitializeLogging()
                 .setRequiredConfigurationProperties(serverProperties.build())
                 .setOptionalConfigurationProperties(optionalProperties)
+                .quiet()
                 .initialize();
 
         injector.getInstance(Announcer.class).start();
 
         lifeCycleManager = injector.getInstance(LifeCycleManager.class);
 
-        queryManager = injector.getInstance(QueryManager.class);
+        if (coordinator) {
+            queryManager = (SqlQueryManager) injector.getInstance(QueryManager.class);
+        }
+        else {
+            queryManager = null;
+        }
 
         pluginManager = injector.getInstance(PluginManager.class);
 
         connectorManager = injector.getInstance(ConnectorManager.class);
 
         server = injector.getInstance(TestingHttpServer.class);
+        catalogManager = injector.getInstance(CatalogManager.class);
         transactionManager = injector.getInstance(TransactionManager.class);
         metadata = injector.getInstance(Metadata.class);
         accessControl = injector.getInstance(TestingAccessControlManager.class);
         procedureTester = injector.getInstance(ProcedureTester.class);
         splitManager = injector.getInstance(SplitManager.class);
-        FeaturesConfig config = injector.getInstance(FeaturesConfig.class);
-        if (config.isResourceGroupsEnabled()) {
-            resourceGroupManager = Optional.of(injector.getInstance(ResourceGroupManager.class));
+        pageSourceManager = injector.getInstance(PageSourceManager.class);
+        if (coordinator) {
+            resourceGroupManager = Optional.of(injector.getInstance(InternalResourceGroupManager.class));
+            nodePartitioningManager = injector.getInstance(NodePartitioningManager.class);
+            clusterMemoryManager = injector.getInstance(ClusterMemoryManager.class);
+            statsCalculator = injector.getInstance(StatsCalculator.class);
         }
         else {
             resourceGroupManager = Optional.empty();
-        }
-        if (coordinator) {
-            clusterMemoryManager = injector.getInstance(ClusterMemoryManager.class);
-        }
-        else {
+            nodePartitioningManager = null;
             clusterMemoryManager = null;
+            statsCalculator = null;
         }
         localMemoryManager = injector.getInstance(LocalMemoryManager.class);
         nodeManager = injector.getInstance(InternalNodeManager.class);
@@ -268,6 +300,7 @@ public class TestingPrestoServer
 
     @Override
     public void close()
+            throws IOException
     {
         try {
             if (lifeCycleManager != null) {
@@ -275,10 +308,13 @@ public class TestingPrestoServer
             }
         }
         catch (Exception e) {
-            throw Throwables.propagate(e);
+            throwIfUnchecked(e);
+            throw new RuntimeException(e);
         }
         finally {
-            deleteRecursively(baseDataDir);
+            if (isDirectory(baseDataDir)) {
+                deleteRecursively(baseDataDir, ALLOW_INSECURE);
+            }
         }
     }
 
@@ -292,15 +328,26 @@ public class TestingPrestoServer
         return queryManager;
     }
 
-    public void createCatalog(String catalogName, String connectorName)
+    public Plan getQueryPlan(QueryId queryId)
     {
-        createCatalog(catalogName, connectorName, ImmutableMap.<String, String>of());
+        return queryManager.getQueryPlan(queryId);
     }
 
-    public void createCatalog(String catalogName, String connectorName, Map<String, String> properties)
+    public void addFinalQueryInfoListener(QueryId queryId, StateChangeListener<QueryInfo> stateChangeListener)
     {
-        connectorManager.createConnection(catalogName, connectorName, properties);
-        updateDatasourcesAnnouncement(announcer, catalogName);
+        queryManager.addFinalQueryInfoListener(queryId, stateChangeListener);
+    }
+
+    public ConnectorId createCatalog(String catalogName, String connectorName)
+    {
+        return createCatalog(catalogName, connectorName, ImmutableMap.of());
+    }
+
+    public ConnectorId createCatalog(String catalogName, String connectorName, Map<String, String> properties)
+    {
+        ConnectorId connectorId = connectorManager.createConnection(catalogName, connectorName, properties);
+        updateConnectorIdAnnouncement(announcer, connectorId, nodeManager);
+        return connectorId;
     }
 
     public Path getBaseDataDir()
@@ -323,6 +370,17 @@ public class TestingPrestoServer
         return HostAndPort.fromParts(getBaseUrl().getHost(), getBaseUrl().getPort());
     }
 
+    public HostAndPort getHttpsAddress()
+    {
+        URI httpsUri = server.getHttpServerInfo().getHttpsUri();
+        return HostAndPort.fromParts(httpsUri.getHost(), httpsUri.getPort());
+    }
+
+    public CatalogManager getCatalogManager()
+    {
+        return catalogManager;
+    }
+
     public TransactionManager getTransactionManager()
     {
         return transactionManager;
@@ -331,6 +389,12 @@ public class TestingPrestoServer
     public Metadata getMetadata()
     {
         return metadata;
+    }
+
+    public StatsCalculator getStatsCalculator()
+    {
+        checkState(coordinator, "not a coordinator");
+        return statsCalculator;
     }
 
     public TestingAccessControlManager getAccessControl()
@@ -348,9 +412,19 @@ public class TestingPrestoServer
         return splitManager;
     }
 
-    public Optional<ResourceGroupManager> getResourceGroupManager()
+    public PageSourceManager getPageSourceManager()
+    {
+        return pageSourceManager;
+    }
+
+    public Optional<InternalResourceGroupManager> getResourceGroupManager()
     {
         return resourceGroupManager;
+    }
+
+    public NodePartitioningManager getNodePartitioningManager()
+    {
+        return nodePartitioningManager;
     }
 
     public LocalMemoryManager getLocalMemoryManager()
@@ -391,31 +465,38 @@ public class TestingPrestoServer
         return nodeManager.getAllNodes();
     }
 
-    public Set<Node> getActiveNodesWithConnector(String connectorName)
+    public Set<Node> getActiveNodesWithConnector(ConnectorId connectorId)
     {
-        return nodeManager.getActiveDatasourceNodes(connectorName);
+        return nodeManager.getActiveConnectorNodes(connectorId);
     }
 
-    private static void updateDatasourcesAnnouncement(Announcer announcer, String connectorId)
+    public <T> T getInstance(Key<T> key)
+    {
+        return injector.getInstance(key);
+    }
+
+    private static void updateConnectorIdAnnouncement(Announcer announcer, ConnectorId connectorId, InternalNodeManager nodeManager)
     {
         //
-        // This code was copied from PrestoServer, and is a hack that should be removed when the data source property is removed
+        // This code was copied from PrestoServer, and is a hack that should be removed when the connectorId property is removed
         //
 
         // get existing announcement
         ServiceAnnouncement announcement = getPrestoAnnouncement(announcer.getServiceAnnouncements());
 
-        // update datasources property
+        // update connectorIds property
         Map<String, String> properties = new LinkedHashMap<>(announcement.getProperties());
-        String property = nullToEmpty(properties.get("datasources"));
-        Set<String> datasources = new LinkedHashSet<>(Splitter.on(',').trimResults().omitEmptyStrings().splitToList(property));
-        datasources.add(connectorId);
-        properties.put("datasources", Joiner.on(',').join(datasources));
+        String property = nullToEmpty(properties.get("connectorIds"));
+        Set<String> connectorIds = new LinkedHashSet<>(Splitter.on(',').trimResults().omitEmptyStrings().splitToList(property));
+        connectorIds.add(connectorId.toString());
+        properties.put("connectorIds", Joiner.on(',').join(connectorIds));
 
         // update announcement
         announcer.removeServiceAnnouncement(announcement.getId());
         announcer.addServiceAnnouncement(serviceAnnouncement(announcement.getType()).addProperties(properties).build());
         announcer.forceAnnounce();
+
+        nodeManager.refreshNodes();
     }
 
     private static ServiceAnnouncement getPrestoAnnouncement(Set<ServiceAnnouncement> announcements)

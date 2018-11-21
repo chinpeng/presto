@@ -15,10 +15,11 @@ package com.facebook.presto.operator;
 
 import com.facebook.presto.metadata.MetadataManager;
 import com.facebook.presto.spi.Page;
+import com.facebook.presto.spi.type.ArrayType;
+import com.facebook.presto.spi.type.RowType;
 import com.facebook.presto.spi.type.Type;
 import com.facebook.presto.sql.planner.plan.PlanNodeId;
 import com.facebook.presto.testing.MaterializedResult;
-import com.facebook.presto.type.ArrayType;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import org.testng.annotations.AfterMethod;
@@ -27,6 +28,7 @@ import org.testng.annotations.Test;
 
 import java.util.List;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.ScheduledExecutorService;
 
 import static com.facebook.presto.RowPagesBuilder.rowPagesBuilder;
 import static com.facebook.presto.SessionTestUtils.TEST_SESSION;
@@ -35,6 +37,7 @@ import static com.facebook.presto.operator.OperatorAssertion.assertOperatorEqual
 import static com.facebook.presto.spi.type.BigintType.BIGINT;
 import static com.facebook.presto.spi.type.DoubleType.DOUBLE;
 import static com.facebook.presto.spi.type.TypeSignature.parseTypeSignature;
+import static com.facebook.presto.spi.type.VarcharType.VARCHAR;
 import static com.facebook.presto.testing.MaterializedResult.resultBuilder;
 import static com.facebook.presto.testing.TestingTaskContext.createTaskContext;
 import static com.facebook.presto.util.StructuralTestUtil.arrayBlockOf;
@@ -44,20 +47,23 @@ import static java.lang.Double.NEGATIVE_INFINITY;
 import static java.lang.Double.NaN;
 import static java.lang.Double.POSITIVE_INFINITY;
 import static java.util.concurrent.Executors.newCachedThreadPool;
+import static java.util.concurrent.Executors.newScheduledThreadPool;
 
 @Test(singleThreaded = true)
 public class TestUnnestOperator
 {
     private ExecutorService executor;
+    private ScheduledExecutorService scheduledExecutor;
     private DriverContext driverContext;
 
     @BeforeMethod
     public void setUp()
     {
-        executor = newCachedThreadPool(daemonThreadsNamed("test-%s"));
+        executor = newCachedThreadPool(daemonThreadsNamed("test-executor-%s"));
+        scheduledExecutor = newScheduledThreadPool(2, daemonThreadsNamed("test-scheduledExecutor-%s"));
 
-        driverContext = createTaskContext(executor, TEST_SESSION)
-                .addPipelineContext(true, true)
+        driverContext = createTaskContext(executor, scheduledExecutor, TEST_SESSION)
+                .addPipelineContext(0, true, true, false)
                 .addDriverContext();
     }
 
@@ -65,11 +71,11 @@ public class TestUnnestOperator
     public void tearDown()
     {
         executor.shutdownNow();
+        scheduledExecutor.shutdownNow();
     }
 
     @Test
     public void testUnnest()
-            throws Exception
     {
         MetadataManager metadata = createTestMetadataManager();
         Type arrayType = metadata.getType(parseTypeSignature("array(bigint)"));
@@ -84,8 +90,7 @@ public class TestUnnestOperator
                 .build();
 
         OperatorFactory operatorFactory = new UnnestOperator.UnnestOperatorFactory(
-                0, new PlanNodeId("test"), ImmutableList.of(0), ImmutableList.<Type>of(BIGINT), ImmutableList.of(1, 2), ImmutableList.of(arrayType, mapType), false);
-        Operator operator = operatorFactory.createOperator(driverContext);
+                0, new PlanNodeId("test"), ImmutableList.of(0), ImmutableList.of(BIGINT), ImmutableList.of(1, 2), ImmutableList.of(arrayType, mapType), false);
 
         MaterializedResult expected = resultBuilder(driverContext.getSession(), BIGINT, BIGINT, BIGINT, BIGINT)
                 .row(1L, 2L, 4L, 5L)
@@ -95,12 +100,11 @@ public class TestUnnestOperator
                 .row(6L, 8L, 11L, 12L)
                 .build();
 
-        assertOperatorEquals(operator, input, expected);
+        assertOperatorEquals(operatorFactory, driverContext, input, expected);
     }
 
     @Test
     public void testUnnestWithArray()
-            throws Exception
     {
         MetadataManager metadata = createTestMetadataManager();
         Type arrayType = metadata.getType(parseTypeSignature("array(array(bigint))"));
@@ -121,8 +125,7 @@ public class TestUnnestOperator
                 .build();
 
         OperatorFactory operatorFactory = new UnnestOperator.UnnestOperatorFactory(
-                0, new PlanNodeId("test"), ImmutableList.of(0), ImmutableList.<Type>of(BIGINT), ImmutableList.of(1, 2), ImmutableList.of(arrayType, mapType), false);
-        Operator operator = operatorFactory.createOperator(driverContext);
+                0, new PlanNodeId("test"), ImmutableList.of(0), ImmutableList.of(BIGINT), ImmutableList.of(1, 2), ImmutableList.of(arrayType, mapType), false);
 
         MaterializedResult expected = resultBuilder(driverContext.getSession(), BIGINT, new ArrayType(BIGINT), new ArrayType(BIGINT), new ArrayType(BIGINT))
                 .row(1L, ImmutableList.of(2L, 4L), ImmutableList.of(4L, 8L), ImmutableList.of(5L, 10L))
@@ -132,12 +135,11 @@ public class TestUnnestOperator
                 .row(6L, ImmutableList.of(8L, 16L), ImmutableList.of(11L, 22L), ImmutableList.of(12L, 24L))
                 .build();
 
-        assertOperatorEquals(operator, input, expected);
+        assertOperatorEquals(operatorFactory, driverContext, input, expected);
     }
 
     @Test
     public void testUnnestWithOrdinality()
-            throws Exception
     {
         MetadataManager metadata = createTestMetadataManager();
         Type arrayType = metadata.getType(parseTypeSignature("array(bigint)"));
@@ -152,8 +154,7 @@ public class TestUnnestOperator
                 .build();
 
         OperatorFactory operatorFactory = new UnnestOperator.UnnestOperatorFactory(
-                0, new PlanNodeId("test"), ImmutableList.of(0), ImmutableList.<Type>of(BIGINT), ImmutableList.of(1, 2), ImmutableList.of(arrayType, mapType), true);
-        Operator operator = operatorFactory.createOperator(driverContext);
+                0, new PlanNodeId("test"), ImmutableList.of(0), ImmutableList.of(BIGINT), ImmutableList.of(1, 2), ImmutableList.of(arrayType, mapType), true);
 
         MaterializedResult expected = resultBuilder(driverContext.getSession(), BIGINT, BIGINT, BIGINT, BIGINT, BIGINT)
                 .row(1L, 2L, 4L, 5L, 1L)
@@ -163,12 +164,11 @@ public class TestUnnestOperator
                 .row(6L, 8L, 11L, 12L, 2L)
                 .build();
 
-        assertOperatorEquals(operator, input, expected);
+        assertOperatorEquals(operatorFactory, driverContext, input, expected);
     }
 
     @Test
     public void testUnnestNonNumericDoubles()
-            throws Exception
     {
         MetadataManager metadata = createTestMetadataManager();
         Type arrayType = metadata.getType(parseTypeSignature("array(double)"));
@@ -180,8 +180,7 @@ public class TestUnnestOperator
                 .build();
 
         OperatorFactory operatorFactory = new UnnestOperator.UnnestOperatorFactory(
-                0, new PlanNodeId("test"), ImmutableList.of(0), ImmutableList.<Type>of(BIGINT), ImmutableList.of(1, 2), ImmutableList.of(arrayType, mapType), false);
-        Operator operator = operatorFactory.createOperator(driverContext);
+                0, new PlanNodeId("test"), ImmutableList.of(0), ImmutableList.of(BIGINT), ImmutableList.of(1, 2), ImmutableList.of(arrayType, mapType), false);
 
         MaterializedResult expected = resultBuilder(driverContext.getSession(), BIGINT, DOUBLE, BIGINT, DOUBLE)
                 .row(1L, NEGATIVE_INFINITY, 1L, NEGATIVE_INFINITY)
@@ -189,6 +188,36 @@ public class TestUnnestOperator
                 .row(1L, NaN, 3L, NaN)
                 .build();
 
-        assertOperatorEquals(operator, input, expected);
+        assertOperatorEquals(operatorFactory, driverContext, input, expected);
+    }
+
+    @Test
+    public void testUnnestWithArrayOfRows()
+    {
+        MetadataManager metadata = createTestMetadataManager();
+        Type arrayOfRowType = metadata.getType(parseTypeSignature("array(row(bigint, double, varchar))"));
+        Type elementType = RowType.anonymous(ImmutableList.of(BIGINT, DOUBLE, VARCHAR));
+
+        List<Page> input = rowPagesBuilder(BIGINT, arrayOfRowType)
+                .row(1, arrayBlockOf(elementType, ImmutableList.of(2, 4.2, "abc"), ImmutableList.of(3, 6.6, "def")))
+                .row(2, arrayBlockOf(elementType, ImmutableList.of(99, 3.14, "pi"), null))
+                .row(3, null)
+                .pageBreak()
+                .row(6, arrayBlockOf(elementType, null, ImmutableList.of(8, 1.111, "tt")))
+                .build();
+
+        OperatorFactory operatorFactory = new UnnestOperator.UnnestOperatorFactory(
+                0, new PlanNodeId("test"), ImmutableList.of(0), ImmutableList.of(BIGINT), ImmutableList.of(1), ImmutableList.of(arrayOfRowType), false);
+
+        MaterializedResult expected = resultBuilder(driverContext.getSession(), BIGINT, BIGINT, DOUBLE, VARCHAR)
+                .row(1L, 2L, 4.2, "abc")
+                .row(1L, 3L, 6.6, "def")
+                .row(2L, 99L, 3.14, "pi")
+                .row(2L, null, null, null)
+                .row(6L, null, null, null)
+                .row(6L, 8L, 1.111, "tt")
+                .build();
+
+        assertOperatorEquals(operatorFactory, driverContext, input, expected);
     }
 }

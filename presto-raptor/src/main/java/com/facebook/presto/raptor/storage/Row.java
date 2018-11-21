@@ -42,9 +42,9 @@ import static java.util.Objects.requireNonNull;
 public class Row
 {
     private final List<Object> columns;
-    private final int sizeInBytes;
+    private final long sizeInBytes;
 
-    public Row(List<Object> columns, int sizeInBytes)
+    public Row(List<Object> columns, long sizeInBytes)
     {
         this.columns = requireNonNull(columns, "columns is null");
         checkArgument(sizeInBytes >= 0, "sizeInBytes must be >= 0");
@@ -56,7 +56,7 @@ public class Row
         return columns;
     }
 
-    public int getSizeInBytes()
+    public long getSizeInBytes()
     {
         return sizeInBytes;
     }
@@ -66,11 +66,11 @@ public class Row
         checkArgument(page.getChannelCount() == types.size(), "channelCount does not match");
         checkArgument(position < page.getPositionCount(), "Requested position %s from a page with positionCount %s ", position, page.getPositionCount());
 
-        RowBuilder rowBuilder = new RowBuilder();
+        RowBuilder rowBuilder = new RowBuilder(page.getChannelCount());
         for (int channel = 0; channel < page.getChannelCount(); channel++) {
             Block block = page.getBlock(channel);
             Type type = types.get(channel);
-            int size;
+            long size;
             Object value = getNativeContainerValue(type, block, position);
             if (value == null) {
                 size = SIZE_OF_BYTE;
@@ -180,15 +180,15 @@ public class Row
 
     private static class RowBuilder
     {
-        private int rowSize;
+        private long rowSize;
         private final List<Object> columns;
 
-        public RowBuilder()
+        public RowBuilder(int columnCount)
         {
-            this.columns = new ArrayList<>();
+            this.columns = new ArrayList<>(columnCount);
         }
 
-        public void add(Object value, int size)
+        public void add(Object value, long size)
         {
             columns.add(value);
             rowSize += size;

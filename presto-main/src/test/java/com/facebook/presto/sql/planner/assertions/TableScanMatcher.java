@@ -14,18 +14,20 @@
 package com.facebook.presto.sql.planner.assertions;
 
 import com.facebook.presto.Session;
+import com.facebook.presto.cost.StatsProvider;
 import com.facebook.presto.metadata.Metadata;
 import com.facebook.presto.metadata.TableMetadata;
-import com.facebook.presto.spi.ColumnHandle;
 import com.facebook.presto.spi.predicate.Domain;
-import com.facebook.presto.spi.predicate.TupleDomain;
 import com.facebook.presto.sql.planner.plan.PlanNode;
 import com.facebook.presto.sql.planner.plan.TableScanNode;
-import com.google.common.base.MoreObjects;
 
 import java.util.Map;
 import java.util.Optional;
 
+import static com.facebook.presto.sql.planner.assertions.PlanMatchPattern.node;
+import static com.facebook.presto.sql.planner.assertions.Util.domainsMatch;
+import static com.google.common.base.MoreObjects.toStringHelper;
+import static com.google.common.base.Preconditions.checkState;
 import static java.util.Objects.requireNonNull;
 
 final class TableScanMatcher
@@ -33,66 +35,93 @@ final class TableScanMatcher
 {
     private final String expectedTableName;
     private final Optional<Map<String, Domain>> expectedConstraint;
+    private final Optional<Boolean> hasTableLayout;
 
-    TableScanMatcher(String expectedTableName)
+    private TableScanMatcher(String expectedTableName, Optional<Map<String, Domain>> expectedConstraint, Optional<Boolean> hasTableLayout)
     {
         this.expectedTableName = requireNonNull(expectedTableName, "expectedTableName is null");
-        expectedConstraint = Optional.empty();
-    }
-
-    public TableScanMatcher(String expectedTableName, Map<String, Domain> expectedConstraint)
-    {
-        this.expectedTableName = requireNonNull(expectedTableName, "expectedTableName is null");
-        this.expectedConstraint = Optional.of(requireNonNull(expectedConstraint, "expectedConstraint is null"));
+        this.expectedConstraint = requireNonNull(expectedConstraint, "expectedConstraint is null");
+        this.hasTableLayout = requireNonNull(hasTableLayout, "hasTableLayout is null");
     }
 
     @Override
-    public boolean matches(PlanNode node, Session session, Metadata metadata, SymbolAliases symbolAliases)
+    public boolean shapeMatches(PlanNode node)
     {
-        if (node instanceof TableScanNode) {
-            TableScanNode tableScanNode = (TableScanNode) node;
-            TableMetadata tableMetadata = metadata.getTableMetadata(session, tableScanNode.getTable());
-            String actualTableName = tableMetadata.getTable().getTableName();
-            return expectedTableName.equalsIgnoreCase(actualTableName) && domainMatches(tableScanNode, session, metadata);
-        }
-        return false;
+        return node instanceof TableScanNode;
     }
 
-    private boolean domainMatches(TableScanNode tableScanNode, Session session, Metadata metadata)
+    @Override
+    public MatchResult detailMatches(PlanNode node, StatsProvider stats, Session session, Metadata metadata, SymbolAliases symbolAliases)
     {
-        if (!expectedConstraint.isPresent()) {
-            return true;
-        }
+        checkState(shapeMatches(node), "Plan testing framework error: shapeMatches returned false in detailMatches in %s", this.getClass().getName());
 
-        TupleDomain<ColumnHandle> actualConstraint = tableScanNode.getCurrentConstraint();
-        if (expectedConstraint.isPresent() && !actualConstraint.getDomains().isPresent()) {
-            return false;
-        }
+        TableScanNode tableScanNode = (TableScanNode) node;
+        TableMetadata tableMetadata = metadata.getTableMetadata(session, tableScanNode.getTable());
+        String actualTableName = tableMetadata.getTable().getTableName();
+        return new MatchResult(
+                expectedTableName.equalsIgnoreCase(actualTableName) &&
+                        ((!expectedConstraint.isPresent()) ||
+                                domainsMatch(expectedConstraint, tableScanNode.getCurrentConstraint(), tableScanNode.getTable(), session, metadata)) &&
+                        hasTableLayout(tableScanNode));
+    }
 
-        Map<String, ColumnHandle> columnHandles = metadata.getColumnHandles(session, tableScanNode.getTable());
-        for (Map.Entry<String, Domain> expectedColumnConstraint : expectedConstraint.get().entrySet()) {
-            if (!columnHandles.containsKey(expectedColumnConstraint.getKey())) {
-                return false;
-            }
-            ColumnHandle columnHandle = columnHandles.get(expectedColumnConstraint.getKey());
-            if (!actualConstraint.getDomains().get().containsKey(columnHandle)) {
-                return false;
-            }
-            if (!expectedColumnConstraint.getValue().contains(actualConstraint.getDomains().get().get(columnHandle))) {
-                return false;
-            }
-        }
-
-        return true;
+    private boolean hasTableLayout(TableScanNode tableScanNode)
+    {
+        return !hasTableLayout.isPresent() || hasTableLayout.get() == tableScanNode.getLayout().isPresent();
     }
 
     @Override
     public String toString()
     {
-        return MoreObjects.toStringHelper(this)
+        return toStringHelper(this)
                 .omitNullValues()
                 .add("expectedTableName", expectedTableName)
                 .add("expectedConstraint", expectedConstraint.orElse(null))
+                .add("hasTableLayout", hasTableLayout.orElse(null))
                 .toString();
+    }
+
+    public static Builder builder(String expectedTableName)
+    {
+        return new Builder(expectedTableName);
+    }
+
+    public static PlanMatchPattern create(String expectedTableName)
+    {
+        return builder(expectedTableName).build();
+    }
+
+    public static class Builder
+    {
+        private final String expectedTableName;
+        private Optional<Map<String, Domain>> expectedConstraint = Optional.empty();
+        private Optional<Boolean> hasTableLayout = Optional.empty();
+
+        private Builder(String expectedTableName)
+        {
+            this.expectedTableName = requireNonNull(expectedTableName, "expectedTableName is null");
+        }
+
+        public Builder expectedConstraint(Map<String, Domain> expectedConstraint)
+        {
+            this.expectedConstraint = Optional.of(expectedConstraint);
+            return this;
+        }
+
+        public Builder hasTableLayout()
+        {
+            this.hasTableLayout = Optional.of(true);
+            return this;
+        }
+
+        PlanMatchPattern build()
+        {
+            PlanMatchPattern result = node(TableScanNode.class).with(
+                    new TableScanMatcher(
+                            expectedTableName,
+                            expectedConstraint,
+                            hasTableLayout));
+            return result;
+        }
     }
 }

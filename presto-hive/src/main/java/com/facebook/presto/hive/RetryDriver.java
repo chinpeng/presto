@@ -13,15 +13,16 @@
  */
 package com.facebook.presto.hive;
 
-import com.google.common.base.Throwables;
 import com.google.common.collect.ImmutableList;
 import io.airlift.log.Logger;
 import io.airlift.units.Duration;
 
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.Callable;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
 
@@ -124,6 +125,7 @@ public class RetryDriver
         requireNonNull(callableName, "callableName is null");
         requireNonNull(callable, "callable is null");
 
+        List<Throwable> suppressedExceptions = new ArrayList<>();
         long startTime = System.nanoTime();
         int attempt = 0;
         while (true) {
@@ -140,22 +142,38 @@ public class RetryDriver
                 e = exceptionMapper.apply(e);
                 for (Class<? extends Exception> clazz : exceptionWhiteList) {
                     if (clazz.isInstance(e)) {
+                        addSuppressed(e, suppressedExceptions);
                         throw e;
                     }
                 }
                 if (attempt >= maxAttempts || Duration.nanosSince(startTime).compareTo(maxRetryTime) >= 0) {
+                    addSuppressed(e, suppressedExceptions);
                     throw e;
                 }
                 log.debug("Failed on executing %s with attempt %d, will retry. Exception: %s", callableName, attempt, e.getMessage());
 
+                suppressedExceptions.add(e);
+
                 int delayInMs = (int) Math.min(minSleepTime.toMillis() * Math.pow(scaleFactor, attempt - 1), maxSleepTime.toMillis());
+                int jitter = ThreadLocalRandom.current().nextInt(Math.max(1, (int) (delayInMs * 0.1)));
                 try {
-                    TimeUnit.MILLISECONDS.sleep(delayInMs);
+                    TimeUnit.MILLISECONDS.sleep(delayInMs + jitter);
                 }
                 catch (InterruptedException ie) {
                     Thread.currentThread().interrupt();
-                    throw Throwables.propagate(ie);
+                    Exception exception = new RuntimeException(ie);
+                    addSuppressed(new RuntimeException(ie), suppressedExceptions);
+                    throw exception;
                 }
+            }
+        }
+    }
+
+    private static void addSuppressed(Exception exception, List<Throwable> suppressedExceptions)
+    {
+        for (Throwable suppressedException : suppressedExceptions) {
+            if (exception != suppressedException) {
+                exception.addSuppressed(suppressedException);
             }
         }
     }

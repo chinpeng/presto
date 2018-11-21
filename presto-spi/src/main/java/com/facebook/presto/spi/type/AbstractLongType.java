@@ -17,7 +17,10 @@ import com.facebook.presto.spi.block.Block;
 import com.facebook.presto.spi.block.BlockBuilder;
 import com.facebook.presto.spi.block.BlockBuilderStatus;
 import com.facebook.presto.spi.block.LongArrayBlockBuilder;
+import com.facebook.presto.spi.block.PageBuilderStatus;
 import io.airlift.slice.Slice;
+
+import static java.lang.Long.rotateLeft;
 
 public abstract class AbstractLongType
         extends AbstractType
@@ -86,7 +89,7 @@ public abstract class AbstractLongType
     @Override
     public long hash(Block block, int position)
     {
-        return block.getLong(position, 0);
+        return hash(block.getLong(position, 0));
     }
 
     @Override
@@ -100,9 +103,16 @@ public abstract class AbstractLongType
     @Override
     public final BlockBuilder createBlockBuilder(BlockBuilderStatus blockBuilderStatus, int expectedEntries, int expectedBytesPerEntry)
     {
+        int maxBlockSizeInBytes;
+        if (blockBuilderStatus == null) {
+            maxBlockSizeInBytes = PageBuilderStatus.DEFAULT_MAX_PAGE_SIZE_IN_BYTES;
+        }
+        else {
+            maxBlockSizeInBytes = blockBuilderStatus.getMaxPageSizeInBytes();
+        }
         return new LongArrayBlockBuilder(
                 blockBuilderStatus,
-                Math.min(expectedEntries, blockBuilderStatus.getMaxBlockSizeInBytes() / Long.BYTES));
+                Math.min(expectedEntries, maxBlockSizeInBytes / Long.BYTES));
     }
 
     @Override
@@ -114,6 +124,12 @@ public abstract class AbstractLongType
     @Override
     public final BlockBuilder createFixedSizeBlockBuilder(int positionCount)
     {
-        return new LongArrayBlockBuilder(new BlockBuilderStatus(), positionCount);
+        return new LongArrayBlockBuilder(null, positionCount);
+    }
+
+    public static long hash(long value)
+    {
+        // xxhash64 mix
+        return rotateLeft(value * 0xC2B2AE3D27D4EB4FL, 31) * 0x9E3779B185EBCA87L;
     }
 }

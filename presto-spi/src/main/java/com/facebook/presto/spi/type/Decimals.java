@@ -14,47 +14,54 @@
 package com.facebook.presto.spi.type;
 
 import com.facebook.presto.spi.PrestoException;
+import com.facebook.presto.spi.block.Block;
 import com.facebook.presto.spi.block.BlockBuilder;
 import io.airlift.slice.Slice;
-import io.airlift.slice.Slices;
 
 import java.math.BigDecimal;
 import java.math.BigInteger;
+import java.math.MathContext;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import static com.facebook.presto.spi.StandardErrorCode.NUMERIC_VALUE_OUT_OF_RANGE;
 import static com.facebook.presto.spi.type.DecimalType.createDecimalType;
-import static io.airlift.slice.SizeOf.SIZE_OF_LONG;
+import static com.facebook.presto.spi.type.UnscaledDecimal128Arithmetic.toUnscaledString;
+import static com.facebook.presto.spi.type.UnscaledDecimal128Arithmetic.unscaledDecimal;
+import static com.facebook.presto.spi.type.UnscaledDecimal128Arithmetic.unscaledDecimalToBigInteger;
 import static java.lang.Math.abs;
 import static java.lang.Math.pow;
 import static java.lang.Math.round;
 import static java.lang.String.format;
 import static java.math.BigInteger.TEN;
+import static java.math.RoundingMode.UNNECESSARY;
 
-public class Decimals
+public final class Decimals
 {
     private Decimals() {}
 
-    public static final int SIZE_OF_LONG_DECIMAL = 2 * SIZE_OF_LONG;
-
     public static final int MAX_PRECISION = 38;
-    public static final int MAX_SHORT_PRECISION = 17;
+    public static final int MAX_SHORT_PRECISION = 18;
 
     public static final BigInteger MAX_DECIMAL_UNSCALED_VALUE = new BigInteger(
             // repeat digit '9' MAX_PRECISION times
             new String(new char[MAX_PRECISION]).replace("\0", "9"));
     public static final BigInteger MIN_DECIMAL_UNSCALED_VALUE = MAX_DECIMAL_UNSCALED_VALUE.negate();
 
-    private static final Pattern DECIMAL_PATTERN = Pattern.compile("(\\+?|-?)((0*)(\\d*))(\\.(\\d+))?");
+    private static final Pattern DECIMAL_PATTERN = Pattern.compile("(\\+?|-?)((0*)(\\d*))(\\.(\\d*))?");
 
-    private static final int POWERS_OF_TEN_TABLE_LENGTH = 100;
-    private static final long[] LONG_POWERS_OF_TEN = new long[POWERS_OF_TEN_TABLE_LENGTH];
-    private static final BigInteger[] BIG_INTEGER_POWERS_OF_TEN = new BigInteger[POWERS_OF_TEN_TABLE_LENGTH];
+    private static final int LONG_POWERS_OF_TEN_TABLE_LENGTH = 19;
+    private static final int BIG_INTEGER_POWERS_OF_TEN_TABLE_LENGTH = 100;
+    private static final long[] LONG_POWERS_OF_TEN = new long[LONG_POWERS_OF_TEN_TABLE_LENGTH];
+    private static final BigInteger[] BIG_INTEGER_POWERS_OF_TEN = new BigInteger[BIG_INTEGER_POWERS_OF_TEN_TABLE_LENGTH];
 
     static {
         for (int i = 0; i < LONG_POWERS_OF_TEN.length; ++i) {
+            // Although this computes using doubles, incidentally, this is exact for all powers of 10 that fit in a long.
             LONG_POWERS_OF_TEN[i] = round(pow(10, i));
+        }
+
+        for (int i = 0; i < BIG_INTEGER_POWERS_OF_TEN.length; ++i) {
             BIG_INTEGER_POWERS_OF_TEN[i] = TEN.pow(i);
         }
     }
@@ -84,7 +91,7 @@ public class Decimals
     {
         Matcher matcher = DECIMAL_PATTERN.matcher(stringValue);
         if (!matcher.matches()) {
-            throw new IllegalArgumentException("invalid decimal value '" + stringValue + "'");
+            throw new IllegalArgumentException("Invalid decimal value '" + stringValue + "'");
         }
 
         String sign = getMatcherGroup(matcher, 1);
@@ -94,6 +101,10 @@ public class Decimals
         String leadingZeros = getMatcherGroup(matcher, 3);
         String integralPart = getMatcherGroup(matcher, 4);
         String fractionalPart = getMatcherGroup(matcher, 6);
+
+        if (leadingZeros.isEmpty() && integralPart.isEmpty() && fractionalPart.isEmpty()) {
+            throw new IllegalArgumentException("Invalid decimal value '" + stringValue + "'");
+        }
 
         int scale = fractionalPart.length();
         int precision;
@@ -127,32 +138,33 @@ public class Decimals
         return groupValue;
     }
 
+    @SuppressWarnings("NumericCastThatLosesPrecision")
     public static Slice encodeUnscaledValue(BigInteger unscaledValue)
     {
-        Slice result = Slices.allocate(SIZE_OF_LONG_DECIMAL);
-        byte[] bytes = unscaledValue.toByteArray();
-        if (unscaledValue.signum() < 0) {
-            // need to fill with 0xff for negative values as we
-            // represent value in two's-complement representation.
-            result.fill((byte) 0xff);
-        }
-        result.setBytes(SIZE_OF_LONG_DECIMAL - bytes.length, bytes);
-        return result;
+        return unscaledDecimal(unscaledValue);
     }
 
     public static Slice encodeUnscaledValue(long unscaledValue)
     {
-        // we just fill top 8 bytes with unscaled value from long
-        // the bottom 8 bytes are filled with 0 for positive values and 0xff for negative ones
-        // conforming two's-complement representation.
-        Slice result = Slices.allocate(SIZE_OF_LONG_DECIMAL);
-        if (unscaledValue < 0) {
-            result.setLong(0, -1L); // fill bottom 8 bytes with 0xff
-        }
-        result.setLong(SIZE_OF_LONG, Long.reverseBytes(unscaledValue));
-        return result;
+        return unscaledDecimal(unscaledValue);
     }
 
+    public static long encodeShortScaledValue(BigDecimal value, int scale)
+    {
+        checkArgument(scale >= 0);
+        return value.setScale(scale, UNNECESSARY).unscaledValue().longValueExact();
+    }
+
+    public static Slice encodeScaledValue(BigDecimal value, int scale)
+    {
+        checkArgument(scale >= 0);
+        return encodeScaledValue(value.setScale(scale, UNNECESSARY));
+    }
+
+    /**
+     * Converts {@link BigDecimal} to {@link Slice} representing it for long {@link DecimalType}.
+     * It is caller responsibility to ensure that {@code value.scale()} equals to {@link DecimalType#getScale()}.
+     */
     public static Slice encodeScaledValue(BigDecimal value)
     {
         return encodeUnscaledValue(value.unscaledValue());
@@ -160,7 +172,7 @@ public class Decimals
 
     public static BigInteger decodeUnscaledValue(Slice valueSlice)
     {
-        return new BigInteger(valueSlice.getBytes());
+        return unscaledDecimalToBigInteger(valueSlice);
     }
 
     public static String toString(long unscaledValue, int scale)
@@ -170,7 +182,7 @@ public class Decimals
 
     public static String toString(Slice unscaledValue, int scale)
     {
-        return toString(decodeUnscaledValue(unscaledValue), scale);
+        return toString(toUnscaledString(unscaledValue), scale);
     }
 
     public static String toString(BigInteger unscaledValue, int scale)
@@ -243,9 +255,32 @@ public class Decimals
         }
     }
 
+    public static BigDecimal readBigDecimal(DecimalType type, Block block, int position)
+    {
+        BigInteger unscaledValue = type.isShort()
+                ? BigInteger.valueOf(type.getLong(block, position))
+                : decodeUnscaledValue(type.getSlice(block, position));
+        return new BigDecimal(unscaledValue, type.getScale(), new MathContext(type.getPrecision()));
+    }
+
     public static void writeBigDecimal(DecimalType decimalType, BlockBuilder blockBuilder, BigDecimal value)
     {
         decimalType.writeSlice(blockBuilder, encodeScaledValue(value));
+    }
+
+    public static BigDecimal rescale(BigDecimal value, DecimalType type)
+    {
+        value = value.setScale(type.getScale(), UNNECESSARY);
+
+        if (value.precision() > type.getPrecision()) {
+            throw new IllegalArgumentException("decimal precision larger than column precision");
+        }
+        return value;
+    }
+
+    public static void writeShortDecimal(BlockBuilder blockBuilder, long value)
+    {
+        blockBuilder.writeLong(value).closeEntry();
     }
 
     public static long rescale(long value, int fromScale, int toScale)
@@ -272,5 +307,12 @@ public class Decimals
     public static boolean isLongDecimal(Type type)
     {
         return type instanceof LongDecimalType;
+    }
+
+    private static void checkArgument(boolean condition)
+    {
+        if (!condition) {
+            throw new IllegalArgumentException();
+        }
     }
 }

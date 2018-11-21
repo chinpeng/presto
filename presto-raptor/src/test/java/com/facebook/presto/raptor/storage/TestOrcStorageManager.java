@@ -13,7 +13,6 @@
  */
 package com.facebook.presto.raptor.storage;
 
-import com.facebook.presto.metadata.InMemoryNodeManager;
 import com.facebook.presto.orc.OrcDataSource;
 import com.facebook.presto.orc.OrcRecordReader;
 import com.facebook.presto.raptor.RaptorColumnHandle;
@@ -37,11 +36,11 @@ import com.facebook.presto.spi.type.SqlTimestamp;
 import com.facebook.presto.spi.type.SqlVarbinary;
 import com.facebook.presto.spi.type.Type;
 import com.facebook.presto.testing.MaterializedResult;
+import com.facebook.presto.testing.TestingNodeManager;
 import com.facebook.presto.type.TypeRegistry;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Iterables;
-import io.airlift.json.JsonCodec;
 import io.airlift.slice.Slice;
 import io.airlift.units.DataSize;
 import io.airlift.units.Duration;
@@ -57,6 +56,7 @@ import org.testng.annotations.Test;
 
 import java.io.File;
 import java.io.IOException;
+import java.util.Arrays;
 import java.util.BitSet;
 import java.util.Collection;
 import java.util.List;
@@ -67,7 +67,9 @@ import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 
 import static com.facebook.presto.RowPagesBuilder.rowPagesBuilder;
+import static com.facebook.presto.raptor.metadata.SchemaDaoUtil.createTablesWithRetry;
 import static com.facebook.presto.raptor.metadata.TestDatabaseShardManager.createShardManager;
+import static com.facebook.presto.raptor.storage.OrcStorageManager.xxhash64;
 import static com.facebook.presto.raptor.storage.OrcTestingUtil.createReader;
 import static com.facebook.presto.raptor.storage.OrcTestingUtil.octets;
 import static com.facebook.presto.spi.type.BigintType.BIGINT;
@@ -78,32 +80,36 @@ import static com.facebook.presto.spi.type.TimeZoneKey.UTC_KEY;
 import static com.facebook.presto.spi.type.TimestampType.TIMESTAMP;
 import static com.facebook.presto.spi.type.VarbinaryType.VARBINARY;
 import static com.facebook.presto.spi.type.VarcharType.createVarcharType;
+import static com.facebook.presto.testing.DateTimeTestingUtils.sqlTimestampOf;
 import static com.facebook.presto.testing.MaterializedResult.materializeSourceDataStream;
 import static com.facebook.presto.testing.MaterializedResult.resultBuilder;
 import static com.facebook.presto.testing.TestingConnectorSession.SESSION;
+import static com.facebook.presto.testing.assertions.Assert.assertEquals;
 import static com.google.common.hash.Hashing.md5;
 import static com.google.common.io.Files.createTempDir;
 import static com.google.common.io.Files.hash;
+import static com.google.common.io.MoreFiles.deleteRecursively;
+import static com.google.common.io.RecursiveDeleteOption.ALLOW_INSECURE;
+import static io.airlift.concurrent.MoreFutures.getFutureValue;
 import static io.airlift.json.JsonCodec.jsonCodec;
 import static io.airlift.slice.Slices.utf8Slice;
 import static io.airlift.slice.Slices.wrappedBuffer;
-import static io.airlift.testing.FileUtils.deleteRecursively;
 import static io.airlift.units.DataSize.Unit.BYTE;
 import static io.airlift.units.DataSize.Unit.MEGABYTE;
 import static java.lang.String.format;
 import static org.joda.time.DateTimeZone.UTC;
-import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertFalse;
 import static org.testng.Assert.assertNotEquals;
+import static org.testng.Assert.assertNotNull;
 import static org.testng.Assert.assertTrue;
 import static org.testng.Assert.fail;
+import static org.testng.FileAssert.assertDirectory;
 import static org.testng.FileAssert.assertFile;
 
 @Test(singleThreaded = true)
 public class TestOrcStorageManager
 {
-    private static final JsonCodec<ShardDelta> SHARD_DELTA_CODEC = jsonCodec(ShardDelta.class);
-    private static final ISOChronology UTC_CHRONOLOGY = ISOChronology.getInstance(UTC);
+    private static final ISOChronology UTC_CHRONOLOGY = ISOChronology.getInstanceUTC();
     private static final DateTime EPOCH = new DateTime(0, UTC_CHRONOLOGY);
     private static final String CURRENT_NODE = "node";
     private static final String CONNECTOR_ID = "test";
@@ -113,9 +119,9 @@ public class TestOrcStorageManager
     private static final int MAX_SHARD_ROWS = 100;
     private static final DataSize MAX_FILE_SIZE = new DataSize(1, MEGABYTE);
     private static final Duration MISSING_SHARD_DISCOVERY = new Duration(5, TimeUnit.MINUTES);
-    private static final ReaderAttributes READER_ATTRIBUTES = new ReaderAttributes(new DataSize(1, MEGABYTE), new DataSize(1, MEGABYTE), new DataSize(1, MEGABYTE));
+    private static final ReaderAttributes READER_ATTRIBUTES = new ReaderAttributes(new DataSize(1, MEGABYTE), new DataSize(1, MEGABYTE), new DataSize(1, MEGABYTE), new DataSize(1, MEGABYTE), true);
 
-    private final NodeManager nodeManager = new InMemoryNodeManager();
+    private final NodeManager nodeManager = new TestingNodeManager();
     private Handle dummyHandle;
     private File temporary;
     private StorageService storageService;
@@ -126,7 +132,6 @@ public class TestOrcStorageManager
 
     @BeforeMethod
     public void setup()
-            throws Exception
     {
         temporary = createTempDir();
         File directory = new File(temporary, "data");
@@ -140,6 +145,8 @@ public class TestOrcStorageManager
 
         IDBI dbi = new DBI("jdbc:h2:mem:test" + System.nanoTime());
         dummyHandle = dbi.open();
+        createTablesWithRetry(dbi);
+
         ShardManager shardManager = createShardManager(dbi);
         Duration discoveryInterval = new Duration(5, TimeUnit.MINUTES);
         recoveryManager = new ShardRecoveryManager(storageService, backupStore, nodeManager, shardManager, discoveryInterval, 10);
@@ -154,7 +161,7 @@ public class TestOrcStorageManager
         if (dummyHandle != null) {
             dummyHandle.close();
         }
-        deleteRecursively(temporary);
+        deleteRecursively(temporary.toPath(), ALLOW_INSECURE);
     }
 
     @Test
@@ -164,7 +171,7 @@ public class TestOrcStorageManager
         OrcStorageManager manager = createOrcStorageManager();
 
         List<Long> columnIds = ImmutableList.of(3L, 7L);
-        List<Type> columnTypes = ImmutableList.<Type>of(BIGINT, createVarcharType(10));
+        List<Type> columnTypes = ImmutableList.of(BIGINT, createVarcharType(10));
 
         StoragePageSink sink = createStoragePageSink(manager, columnIds, columnTypes);
         List<Page> pages = rowPagesBuilder(columnTypes)
@@ -182,7 +189,7 @@ public class TestOrcStorageManager
         List<RecordedShard> recordedShards = shardRecorder.getShards();
         assertEquals(recordedShards.size(), 1);
 
-        List<ShardInfo> shards = sink.commit();
+        List<ShardInfo> shards = getFutureValue(sink.commit());
 
         assertEquals(shards.size(), 1);
         ShardInfo shardInfo = Iterables.getOnlyElement(shards);
@@ -196,6 +203,7 @@ public class TestOrcStorageManager
 
         assertEquals(shardInfo.getRowCount(), 2);
         assertEquals(shardInfo.getCompressedSize(), file.length());
+        assertEquals(shardInfo.getXxhash64(), xxhash64(file));
 
         // verify primary and backup shard exist
         assertFile(file, "primary shard");
@@ -208,7 +216,7 @@ public class TestOrcStorageManager
         assertTrue(file.getParentFile().delete());
         assertFalse(file.exists());
 
-        recoveryManager.restoreFromBackup(shardUuid, OptionalLong.empty());
+        recoveryManager.restoreFromBackup(shardUuid, shardInfo.getCompressedSize(), OptionalLong.of(shardInfo.getXxhash64()));
 
         try (OrcDataSource dataSource = manager.openShard(shardUuid, READER_ATTRIBUTES)) {
             OrcRecordReader reader = createReader(dataSource, columnIds, columnTypes);
@@ -236,7 +244,7 @@ public class TestOrcStorageManager
         OrcStorageManager manager = createOrcStorageManager();
 
         List<Long> columnIds = ImmutableList.of(2L, 4L, 6L, 7L, 8L, 9L);
-        List<Type> columnTypes = ImmutableList.<Type>of(BIGINT, createVarcharType(10), VARBINARY, DATE, BOOLEAN, DOUBLE);
+        List<Type> columnTypes = ImmutableList.of(BIGINT, createVarcharType(10), VARBINARY, DATE, BOOLEAN, DOUBLE);
 
         byte[] bytes1 = octets(0x00, 0xFE, 0xFF);
         byte[] bytes3 = octets(0x01, 0x02, 0x19, 0x80);
@@ -251,7 +259,7 @@ public class TestOrcStorageManager
                 {885L, "max", null, null, null, Double.MAX_VALUE},
                 {886L, "pzero", null, null, null, 0.0},
                 {887L, "nzero", null, null, null, -0.0},
-                };
+        };
 
         List<Page> pages = rowPagesBuilder(columnTypes)
                 .row(123L, "hello", wrappedBuffer(bytes1), sqlDate(2001, 8, 22).getDays(), true, 123.45)
@@ -261,7 +269,7 @@ public class TestOrcStorageManager
                 .build();
 
         sink.appendPages(pages);
-        List<ShardInfo> shards = sink.commit();
+        List<ShardInfo> shards = getFutureValue(sink.commit());
 
         assertEquals(shards.size(), 1);
         UUID uuid = Iterables.getOnlyElement(shards).getShardUuid();
@@ -311,7 +319,7 @@ public class TestOrcStorageManager
 
         long transactionId = TRANSACTION_ID;
         List<Long> columnIds = ImmutableList.of(3L, 7L);
-        List<Type> columnTypes = ImmutableList.<Type>of(BIGINT, createVarcharType(10));
+        List<Type> columnTypes = ImmutableList.of(BIGINT, createVarcharType(10));
 
         // create file with 2 rows
         StoragePageSink sink = createStoragePageSink(manager, columnIds, columnTypes);
@@ -320,7 +328,7 @@ public class TestOrcStorageManager
                 .row(456L, "bye")
                 .build();
         sink.appendPages(pages);
-        List<ShardInfo> shards = sink.commit();
+        List<ShardInfo> shards = getFutureValue(sink.commit());
 
         assertEquals(shardRecorder.getShards().size(), 1);
 
@@ -350,17 +358,17 @@ public class TestOrcStorageManager
 
     @Test
     public void testWriterRollback()
-            throws Exception
     {
-        // verify staging directory does not exist
+        // verify staging directory is empty
         File staging = new File(new File(temporary, "data"), "staging");
-        assertFalse(staging.exists());
+        assertDirectory(staging);
+        assertEquals(staging.list(), new String[] {});
 
         // create a shard in staging
         OrcStorageManager manager = createOrcStorageManager();
 
         List<Long> columnIds = ImmutableList.of(3L, 7L);
-        List<Type> columnTypes = ImmutableList.<Type>of(BIGINT, createVarcharType(10));
+        List<Type> columnTypes = ImmutableList.of(BIGINT, createVarcharType(10));
 
         StoragePageSink sink = createStoragePageSink(manager, columnIds, columnTypes);
         List<Page> pages = rowPagesBuilder(columnTypes)
@@ -373,13 +381,18 @@ public class TestOrcStorageManager
 
         // verify shard exists in staging
         String[] files = staging.list();
-        assertEquals(files.length, 1);
-        assertTrue(files[0].endsWith(".orc"));
+        assertNotNull(files);
+        String stagingFile = Arrays.stream(files)
+                .filter(file -> file.endsWith(".orc"))
+                .findFirst()
+                .orElseThrow(() -> new AssertionError("file not found in staging"));
 
         // rollback should cleanup staging files
         sink.rollback();
 
-        assertEquals(staging.list(), new String[] {});
+        files = staging.list();
+        assertNotNull(files);
+        assertTrue(Arrays.stream(files).noneMatch(stagingFile::equals));
     }
 
     @Test
@@ -488,12 +501,11 @@ public class TestOrcStorageManager
 
     @Test
     public void testMaxShardRows()
-            throws Exception
     {
         OrcStorageManager manager = createOrcStorageManager(2, new DataSize(2, MEGABYTE));
 
         List<Long> columnIds = ImmutableList.of(3L, 7L);
-        List<Type> columnTypes = ImmutableList.<Type>of(BIGINT, createVarcharType(10));
+        List<Type> columnTypes = ImmutableList.of(BIGINT, createVarcharType(10));
 
         StoragePageSink sink = createStoragePageSink(manager, columnIds, columnTypes);
         List<Page> pages = rowPagesBuilder(columnTypes)
@@ -506,10 +518,9 @@ public class TestOrcStorageManager
 
     @Test
     public void testMaxFileSize()
-            throws Exception
     {
         List<Long> columnIds = ImmutableList.of(3L, 7L);
-        List<Type> columnTypes = ImmutableList.<Type>of(BIGINT, createVarcharType(5));
+        List<Type> columnTypes = ImmutableList.of(BIGINT, createVarcharType(5));
 
         List<Page> pages = rowPagesBuilder(columnTypes)
                 .row(123L, "hello")
@@ -536,7 +547,7 @@ public class TestOrcStorageManager
     private static StoragePageSink createStoragePageSink(StorageManager manager, List<Long> columnIds, List<Type> columnTypes)
     {
         long transactionId = TRANSACTION_ID;
-        return manager.createStoragePageSink(transactionId, OptionalInt.empty(), columnIds, columnTypes);
+        return manager.createStoragePageSink(transactionId, OptionalInt.empty(), columnIds, columnTypes, false);
     }
 
     private OrcStorageManager createOrcStorageManager()
@@ -550,13 +561,11 @@ public class TestOrcStorageManager
     }
 
     public static OrcStorageManager createOrcStorageManager(IDBI dbi, File temporary)
-            throws IOException
     {
         return createOrcStorageManager(dbi, temporary, MAX_SHARD_ROWS);
     }
 
     public static OrcStorageManager createOrcStorageManager(IDBI dbi, File temporary, int maxShardRows)
-            throws IOException
     {
         File directory = new File(temporary, "data");
         StorageService storageService = new FileStorageService(directory);
@@ -571,7 +580,7 @@ public class TestOrcStorageManager
         ShardRecoveryManager recoveryManager = new ShardRecoveryManager(
                 storageService,
                 backupStore,
-                new InMemoryNodeManager(),
+                new TestingNodeManager(),
                 shardManager,
                 MISSING_SHARD_DISCOVERY,
                 10);
@@ -596,9 +605,8 @@ public class TestOrcStorageManager
                 CURRENT_NODE,
                 storageService,
                 backupStore,
-                SHARD_DELTA_CODEC,
                 READER_ATTRIBUTES,
-                new BackupManager(backupStore, 1),
+                new BackupManager(backupStore, storageService, 1),
                 recoveryManager,
                 shardRecorder,
                 new TypeRegistry(),
@@ -606,7 +614,8 @@ public class TestOrcStorageManager
                 DELETION_THREADS,
                 SHARD_RECOVERY_TIMEOUT,
                 maxShardRows,
-                maxFileSize);
+                maxFileSize,
+                new DataSize(0, BYTE));
     }
 
     private static void assertFileEquals(File actual, File expected)
@@ -655,7 +664,7 @@ public class TestOrcStorageManager
         OrcStorageManager manager = createOrcStorageManager();
         StoragePageSink sink = createStoragePageSink(manager, columnIds, columnTypes);
         sink.appendPages(rowPagesBuilder(columnTypes).rows(rows).build());
-        List<ShardInfo> shards = sink.commit();
+        List<ShardInfo> shards = getFutureValue(sink.commit());
 
         assertEquals(shards.size(), 1);
         return Iterables.getOnlyElement(shards).getColumnStats();
@@ -674,7 +683,6 @@ public class TestOrcStorageManager
 
     private static SqlTimestamp sqlTimestamp(int year, int month, int day, int hour, int minute, int second)
     {
-        DateTime dateTime = new DateTime(year, month, day, hour, minute, second, 0, UTC);
-        return new SqlTimestamp(dateTime.getMillis(), UTC_KEY);
+        return sqlTimestampOf(year, month, day, hour, minute, second, 0, UTC, UTC_KEY, SESSION);
     }
 }

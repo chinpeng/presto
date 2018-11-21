@@ -13,6 +13,7 @@
  */
 package com.facebook.presto.connector.system;
 
+import com.facebook.presto.connector.ConnectorId;
 import com.facebook.presto.spi.ConnectorSession;
 import com.facebook.presto.spi.ConnectorTableMetadata;
 import com.facebook.presto.spi.InMemoryRecordSet;
@@ -22,7 +23,6 @@ import com.facebook.presto.spi.SchemaTableName;
 import com.facebook.presto.spi.SystemTable;
 import com.facebook.presto.spi.block.Block;
 import com.facebook.presto.spi.block.BlockBuilder;
-import com.facebook.presto.spi.block.BlockBuilderStatus;
 import com.facebook.presto.spi.connector.ConnectorTransactionHandle;
 import com.facebook.presto.spi.predicate.TupleDomain;
 import com.facebook.presto.spi.type.TypeManager;
@@ -94,22 +94,22 @@ public class TransactionsSystemTable
                     info.isAutoCommitContext(),
                     info.getCreateTime().getMillis(),
                     (long) info.getIdleTime().getValue(TimeUnit.SECONDS),
-                    info.getWrittenConnectorId().orElse(null),
+                    info.getWrittenConnectorId().map(ConnectorId::getCatalogName).orElse(null),
                     createStringsBlock(info.getConnectorIds()));
         }
         return table.build().cursor();
     }
 
-    private static Block createStringsBlock(List<String> values)
+    private static Block createStringsBlock(List<ConnectorId> values)
     {
         VarcharType varchar = createUnboundedVarcharType();
-        BlockBuilder builder = varchar.createBlockBuilder(new BlockBuilderStatus(), values.size());
-        for (String value : values) {
+        BlockBuilder builder = varchar.createBlockBuilder(null, values.size());
+        for (ConnectorId value : values) {
             if (value == null) {
                 builder.appendNull();
             }
             else {
-                varchar.writeString(builder, value);
+                varchar.writeString(builder, value.getCatalogName());
             }
         }
         return builder.build();

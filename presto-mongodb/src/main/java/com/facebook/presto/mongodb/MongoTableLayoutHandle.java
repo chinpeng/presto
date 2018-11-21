@@ -30,16 +30,12 @@ public class MongoTableLayoutHandle
     private final TupleDomain<ColumnHandle> tupleDomain;
 
     @JsonCreator
-    public MongoTableLayoutHandle(@JsonProperty("table") MongoTableHandle table,
-                                  @JsonProperty("tupleDomain") TupleDomain<ColumnHandle> tupleDomain)
+    public MongoTableLayoutHandle(
+            @JsonProperty("table") MongoTableHandle table,
+            @JsonProperty("tupleDomain") TupleDomain<ColumnHandle> tupleDomain)
     {
         this.table = requireNonNull(table, "table is null");
         this.tupleDomain = requireNonNull(tupleDomain, "tuple is null");
-    }
-
-    public String getConnectorId()
-    {
-        return table.getConnectorId();
     }
 
     @JsonProperty

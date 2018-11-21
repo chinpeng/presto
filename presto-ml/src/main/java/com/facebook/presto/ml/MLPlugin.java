@@ -20,15 +20,27 @@ import com.facebook.presto.spi.type.Type;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
 
-import java.util.List;
 import java.util.Set;
 
+import static com.facebook.presto.ml.MLFeaturesFunctions.ML_FEATURE_FUNCTIONS;
 import static com.facebook.presto.ml.type.ModelType.MODEL;
 import static com.facebook.presto.ml.type.RegressorType.REGRESSOR;
 
 public class MLPlugin
         implements Plugin
 {
+    @Override
+    public Iterable<Type> getTypes()
+    {
+        return ImmutableList.of(MODEL, REGRESSOR);
+    }
+
+    @Override
+    public Iterable<ParametricType> getParametricTypes()
+    {
+        return ImmutableList.of(new ClassifierParametricType());
+    }
+
     @Override
     public Set<Class<?>> getFunctions()
     {
@@ -41,18 +53,7 @@ public class MLPlugin
                 .add(LearnLibSvmRegressorAggregation.class)
                 .add(EvaluateClassifierPredictionsAggregation.class)
                 .add(MLFunctions.class)
+                .addAll(ML_FEATURE_FUNCTIONS)
                 .build();
-    }
-
-    @Override
-    public <T> List<T> getServices(Class<T> type)
-    {
-        if (type == Type.class) {
-            return ImmutableList.of(type.cast(MODEL), type.cast(REGRESSOR));
-        }
-        if (type == ParametricType.class) {
-            return ImmutableList.of(type.cast(new ClassifierParametricType()));
-        }
-        return ImmutableList.of();
     }
 }

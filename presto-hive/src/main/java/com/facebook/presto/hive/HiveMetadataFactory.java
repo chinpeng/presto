@@ -13,7 +13,10 @@
  */
 package com.facebook.presto.hive;
 
+import com.facebook.presto.hive.metastore.CachingHiveMetastore;
 import com.facebook.presto.hive.metastore.ExtendedHiveMetastore;
+import com.facebook.presto.hive.metastore.SemiTransactionalHiveMetastore;
+import com.facebook.presto.hive.statistics.MetastoreHiveStatisticsProvider;
 import com.facebook.presto.spi.type.TypeManager;
 import io.airlift.concurrent.BoundedExecutor;
 import io.airlift.json.JsonCodec;
@@ -23,20 +26,21 @@ import org.joda.time.DateTimeZone;
 import javax.inject.Inject;
 
 import java.util.concurrent.ExecutorService;
+import java.util.function.Supplier;
 
 import static java.util.Objects.requireNonNull;
 
 public class HiveMetadataFactory
+        implements Supplier<TransactionalMetadata>
 {
     private static final Logger log = Logger.get(HiveMetadataFactory.class);
 
-    private final String connectorId;
     private final boolean allowCorruptWritesForTesting;
-    private final boolean respectTableFormat;
-    private final boolean bucketExecutionEnabled;
-    private final boolean bucketWritingEnabled;
-    private final boolean forceIntegralToBigint;
-    private final HiveStorageFormat defaultStorageFormat;
+    private final boolean skipDeletionForAlter;
+    private final boolean writesToNonManagedTablesEnabled;
+    private final boolean createsOfNonManagedTablesEnabled;
+    private final long perTransactionCacheMaximumSize;
+    private final int maxPartitions;
     private final ExtendedHiveMetastore metastore;
     private final HdfsEnvironment hdfsEnvironment;
     private final HivePartitionManager partitionManager;
@@ -47,11 +51,11 @@ public class HiveMetadataFactory
     private final JsonCodec<PartitionUpdate> partitionUpdateCodec;
     private final BoundedExecutor renameExecution;
     private final TypeTranslator typeTranslator;
+    private final String prestoVersion;
 
     @Inject
     @SuppressWarnings("deprecation")
     public HiveMetadataFactory(
-            HiveConnectorId connectorId,
             HiveClientConfig hiveClientConfig,
             ExtendedHiveMetastore metastore,
             HdfsEnvironment hdfsEnvironment,
@@ -61,56 +65,55 @@ public class HiveMetadataFactory
             LocationService locationService,
             TableParameterCodec tableParameterCodec,
             JsonCodec<PartitionUpdate> partitionUpdateCodec,
-            TypeTranslator typeTranslator)
+            TypeTranslator typeTranslator,
+            NodeVersion nodeVersion)
     {
-        this(connectorId,
+        this(
                 metastore,
                 hdfsEnvironment,
                 partitionManager,
                 hiveClientConfig.getDateTimeZone(),
                 hiveClientConfig.getMaxConcurrentFileRenames(),
                 hiveClientConfig.getAllowCorruptWritesForTesting(),
-                hiveClientConfig.isRespectTableFormat(),
-                hiveClientConfig.isBucketExecutionEnabled(),
-                hiveClientConfig.isBucketWritingEnabled(),
-                hiveClientConfig.isForceIntegralToBigint(),
-                hiveClientConfig.getHiveStorageFormat(),
+                hiveClientConfig.isSkipDeletionForAlter(),
+                hiveClientConfig.getWritesToNonManagedTablesEnabled(),
+                hiveClientConfig.getCreatesOfNonManagedTablesEnabled(),
+                hiveClientConfig.getPerTransactionMetastoreCacheMaximumSize(),
+                hiveClientConfig.getMaxPartitionsPerScan(),
                 typeManager,
                 locationService,
                 tableParameterCodec,
                 partitionUpdateCodec,
                 executorService,
-                typeTranslator);
+                typeTranslator,
+                nodeVersion.toString());
     }
 
     public HiveMetadataFactory(
-            HiveConnectorId connectorId,
             ExtendedHiveMetastore metastore,
             HdfsEnvironment hdfsEnvironment,
             HivePartitionManager partitionManager,
             DateTimeZone timeZone,
             int maxConcurrentFileRenames,
             boolean allowCorruptWritesForTesting,
-            boolean respectTableFormat,
-            boolean bucketExecutionEnabled,
-            boolean bucketWritingEnabled,
-            boolean forceIntegralToBigint,
-            HiveStorageFormat defaultStorageFormat,
+            boolean skipDeletionForAlter,
+            boolean writesToNonManagedTablesEnabled,
+            boolean createsOfNonManagedTablesEnabled,
+            long perTransactionCacheMaximumSize,
+            int maxPartitions,
             TypeManager typeManager,
             LocationService locationService,
             TableParameterCodec tableParameterCodec,
             JsonCodec<PartitionUpdate> partitionUpdateCodec,
             ExecutorService executorService,
-            TypeTranslator typeTranslator)
+            TypeTranslator typeTranslator,
+            String prestoVersion)
     {
-        this.connectorId = requireNonNull(connectorId, "connectorId is null").toString();
-
         this.allowCorruptWritesForTesting = allowCorruptWritesForTesting;
-        this.respectTableFormat = respectTableFormat;
-        this.bucketExecutionEnabled = bucketExecutionEnabled;
-        this.bucketWritingEnabled = bucketWritingEnabled;
-        this.forceIntegralToBigint = forceIntegralToBigint;
-        this.defaultStorageFormat = requireNonNull(defaultStorageFormat, "defaultStorageFormat is null");
+        this.skipDeletionForAlter = skipDeletionForAlter;
+        this.writesToNonManagedTablesEnabled = writesToNonManagedTablesEnabled;
+        this.createsOfNonManagedTablesEnabled = createsOfNonManagedTablesEnabled;
+        this.perTransactionCacheMaximumSize = perTransactionCacheMaximumSize;
 
         this.metastore = requireNonNull(metastore, "metastore is null");
         this.hdfsEnvironment = requireNonNull(hdfsEnvironment, "hdfsEnvironment is null");
@@ -121,6 +124,8 @@ public class HiveMetadataFactory
         this.tableParameterCodec = requireNonNull(tableParameterCodec, "tableParameterCodec is null");
         this.partitionUpdateCodec = requireNonNull(partitionUpdateCodec, "partitionUpdateCodec is null");
         this.typeTranslator = requireNonNull(typeTranslator, "typeTranslator is null");
+        this.prestoVersion = requireNonNull(prestoVersion, "prestoVersion is null");
+        this.maxPartitions = maxPartitions;
 
         if (!allowCorruptWritesForTesting && !timeZone.equals(DateTimeZone.getDefault())) {
             log.warn("Hive writes are disabled. " +
@@ -132,25 +137,30 @@ public class HiveMetadataFactory
         renameExecution = new BoundedExecutor(executorService, maxConcurrentFileRenames);
     }
 
-    public HiveMetadata create()
+    @Override
+    public HiveMetadata get()
     {
+        SemiTransactionalHiveMetastore metastore = new SemiTransactionalHiveMetastore(
+                hdfsEnvironment,
+                CachingHiveMetastore.memoizeMetastore(this.metastore, perTransactionCacheMaximumSize), // per-transaction cache
+                renameExecution,
+                skipDeletionForAlter);
+
         return new HiveMetadata(
-                connectorId,
                 metastore,
                 hdfsEnvironment,
                 partitionManager,
                 timeZone,
                 allowCorruptWritesForTesting,
-                respectTableFormat,
-                bucketExecutionEnabled,
-                bucketWritingEnabled,
-                forceIntegralToBigint,
-                defaultStorageFormat,
+                writesToNonManagedTablesEnabled,
+                createsOfNonManagedTablesEnabled,
                 typeManager,
                 locationService,
                 tableParameterCodec,
                 partitionUpdateCodec,
-                renameExecution,
-                typeTranslator);
+                typeTranslator,
+                prestoVersion,
+                new MetastoreHiveStatisticsProvider(metastore),
+                maxPartitions);
     }
 }

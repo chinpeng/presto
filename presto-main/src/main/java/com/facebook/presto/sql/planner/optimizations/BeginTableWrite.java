@@ -14,15 +14,16 @@
 package com.facebook.presto.sql.planner.optimizations;
 
 import com.facebook.presto.Session;
+import com.facebook.presto.execution.warnings.WarningCollector;
 import com.facebook.presto.metadata.Metadata;
 import com.facebook.presto.metadata.TableHandle;
-import com.facebook.presto.metadata.TableLayoutHandle;
 import com.facebook.presto.metadata.TableLayoutResult;
+import com.facebook.presto.spi.ColumnHandle;
 import com.facebook.presto.spi.Constraint;
-import com.facebook.presto.spi.type.Type;
+import com.facebook.presto.spi.predicate.TupleDomain;
 import com.facebook.presto.sql.planner.PlanNodeIdAllocator;
-import com.facebook.presto.sql.planner.Symbol;
 import com.facebook.presto.sql.planner.SymbolAllocator;
+import com.facebook.presto.sql.planner.TypeProvider;
 import com.facebook.presto.sql.planner.plan.DeleteNode;
 import com.facebook.presto.sql.planner.plan.ExchangeNode;
 import com.facebook.presto.sql.planner.plan.FilterNode;
@@ -40,11 +41,11 @@ import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Iterables;
 
 import java.util.List;
-import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 
-import static com.facebook.presto.sql.planner.optimizations.ScalarQueryUtil.isScalar;
+import static com.facebook.presto.metadata.TableLayoutResult.computeEnforced;
+import static com.facebook.presto.sql.planner.optimizations.QueryCardinalityUtil.isAtMostScalar;
 import static com.facebook.presto.sql.planner.plan.ChildReplacer.replaceChildren;
 import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.base.Verify.verify;
@@ -68,7 +69,7 @@ public class BeginTableWrite
     }
 
     @Override
-    public PlanNode optimize(PlanNode plan, Session session, Map<Symbol, Type> types, SymbolAllocator symbolAllocator, PlanNodeIdAllocator idAllocator)
+    public PlanNode optimize(PlanNode plan, Session session, TypeProvider types, SymbolAllocator symbolAllocator, PlanNodeIdAllocator idAllocator, WarningCollector warningCollector)
     {
         return SimplePlanRewriter.rewriteWith(new Rewriter(session), plan, new Context());
     }
@@ -94,11 +95,13 @@ public class BeginTableWrite
                     node.getId(),
                     node.getSource().accept(this, context),
                     writerTarget,
+                    node.getRowCountSymbol(),
+                    node.getFragmentSymbol(),
                     node.getColumns(),
                     node.getColumnNames(),
-                    node.getOutputSymbols(),
-                    node.getSampleWeightSymbol(),
-                    node.getPartitioningScheme());
+                    node.getPartitioningScheme(),
+                    node.getStatisticsAggregation(),
+                    node.getStatisticsAggregationDescriptor());
         }
 
         @Override
@@ -124,7 +127,13 @@ public class BeginTableWrite
             context.get().addMaterializedHandle(originalTarget, newTarget);
             child = child.accept(this, context);
 
-            return new TableFinishNode(node.getId(), child, newTarget, node.getOutputSymbols());
+            return new TableFinishNode(
+                    node.getId(),
+                    child,
+                    newTarget,
+                    node.getRowCountSymbol(),
+                    node.getStatisticsAggregation(),
+                    node.getStatisticsAggregationDescriptor());
         }
 
         public TableWriterNode.WriterTarget getTarget(PlanNode node)
@@ -147,17 +156,18 @@ public class BeginTableWrite
         private TableWriterNode.WriterTarget createWriterTarget(TableWriterNode.WriterTarget target)
         {
             // TODO: begin these operations in pre-execution step, not here
+            // TODO: we shouldn't need to store the schemaTableName in the handles, but there isn't a good way to pass this around with the current architecture
             if (target instanceof TableWriterNode.CreateName) {
                 TableWriterNode.CreateName create = (TableWriterNode.CreateName) target;
-                return new TableWriterNode.CreateHandle(metadata.beginCreateTable(session, create.getCatalog(), create.getTableMetadata(), create.getLayout()));
+                return new TableWriterNode.CreateHandle(metadata.beginCreateTable(session, create.getCatalog(), create.getTableMetadata(), create.getLayout()), create.getTableMetadata().getTable());
             }
             if (target instanceof TableWriterNode.InsertReference) {
                 TableWriterNode.InsertReference insert = (TableWriterNode.InsertReference) target;
-                return new TableWriterNode.InsertHandle(metadata.beginInsert(session, insert.getHandle()));
+                return new TableWriterNode.InsertHandle(metadata.beginInsert(session, insert.getHandle()), metadata.getTableMetadata(session, insert.getHandle()).getTable());
             }
             if (target instanceof TableWriterNode.DeleteHandle) {
                 TableWriterNode.DeleteHandle delete = (TableWriterNode.DeleteHandle) target;
-                return new TableWriterNode.DeleteHandle(metadata.beginDelete(session, delete.getHandle()));
+                return new TableWriterNode.DeleteHandle(metadata.beginDelete(session, delete.getHandle()), delete.getSchemaTableName());
             }
             throw new IllegalArgumentException("Unhandled target type: " + target.getClass().getSimpleName());
         }
@@ -166,23 +176,24 @@ public class BeginTableWrite
         {
             if (node instanceof TableScanNode) {
                 TableScanNode scan = (TableScanNode) node;
+                TupleDomain<ColumnHandle> originalEnforcedConstraint = scan.getEnforcedConstraint();
 
                 List<TableLayoutResult> layouts = metadata.getLayouts(
                         session,
                         handle,
-                        new Constraint<>(scan.getCurrentConstraint(), bindings -> true),
+                        new Constraint<>(originalEnforcedConstraint),
                         Optional.of(ImmutableSet.copyOf(scan.getAssignments().values())));
                 verify(layouts.size() == 1, "Expected exactly one layout for delete");
-                TableLayoutHandle layout = Iterables.getOnlyElement(layouts).getLayout().getHandle();
+                TableLayoutResult layoutResult = Iterables.getOnlyElement(layouts);
 
                 return new TableScanNode(
                         scan.getId(),
                         handle,
                         scan.getOutputSymbols(),
                         scan.getAssignments(),
-                        Optional.of(layout),
-                        scan.getCurrentConstraint(),
-                        scan.getOriginalConstraint());
+                        Optional.of(layoutResult.getLayout().getHandle()),
+                        layoutResult.getLayout().getPredicate(),
+                        computeEnforced(originalEnforcedConstraint, layoutResult.getUnenforcedConstraint()));
             }
 
             if (node instanceof FilterNode) {
@@ -197,9 +208,12 @@ public class BeginTableWrite
                 PlanNode source = rewriteDeleteTableScan(((SemiJoinNode) node).getSource(), handle);
                 return replaceChildren(node, ImmutableList.of(source, ((SemiJoinNode) node).getFilteringSource()));
             }
-            if (node instanceof JoinNode && (((JoinNode) node).getType() == JoinNode.Type.INNER) && isScalar(((JoinNode) node).getRight())) {
-                PlanNode source = rewriteDeleteTableScan(((JoinNode) node).getLeft(), handle);
-                return replaceChildren(node, ImmutableList.of(source, ((JoinNode) node).getRight()));
+            if (node instanceof JoinNode) {
+                JoinNode joinNode = (JoinNode) node;
+                if (joinNode.getType() == JoinNode.Type.INNER && isAtMostScalar(joinNode.getRight())) {
+                    PlanNode source = rewriteDeleteTableScan(joinNode.getLeft(), handle);
+                    return replaceChildren(node, ImmutableList.of(source, joinNode.getRight()));
+                }
             }
             throw new IllegalArgumentException("Invalid descendant for DeleteNode: " + node.getClass().getName());
         }

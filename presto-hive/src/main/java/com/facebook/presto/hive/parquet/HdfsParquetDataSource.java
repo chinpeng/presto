@@ -13,6 +13,8 @@
  */
 package com.facebook.presto.hive.parquet;
 
+import com.facebook.presto.hive.FileFormatDataSourceStats;
+import com.facebook.presto.parquet.ParquetDataSource;
 import com.facebook.presto.spi.PrestoException;
 import org.apache.hadoop.fs.FSDataInputStream;
 import org.apache.hadoop.fs.FileSystem;
@@ -33,12 +35,14 @@ public class HdfsParquetDataSource
     private final long size;
     private final FSDataInputStream inputStream;
     private long readBytes;
+    private final FileFormatDataSourceStats stats;
 
-    public HdfsParquetDataSource(Path path, long size, FSDataInputStream inputStream)
+    public HdfsParquetDataSource(Path path, long size, FSDataInputStream inputStream, FileFormatDataSourceStats stats)
     {
         this.name = path.toString();
         this.size = size;
         this.inputStream = inputStream;
+        this.stats = stats;
     }
 
     @Override
@@ -62,40 +66,38 @@ public class HdfsParquetDataSource
 
     @Override
     public final void readFully(long position, byte[] buffer)
-            throws IOException
     {
         readFully(position, buffer, 0, buffer.length);
     }
 
     @Override
     public final void readFully(long position, byte[] buffer, int bufferOffset, int bufferLength)
-            throws IOException
     {
         readInternal(position, buffer, bufferOffset, bufferLength);
         readBytes += bufferLength;
     }
 
     private void readInternal(long position, byte[] buffer, int bufferOffset, int bufferLength)
-            throws IOException
     {
         try {
+            long readStart = System.nanoTime();
             inputStream.readFully(position, buffer, bufferOffset, bufferLength);
+            stats.readDataBytesPerSecond(bufferLength, System.nanoTime() - readStart);
         }
         catch (PrestoException e) {
             // just in case there is a Presto wrapper or hook
             throw e;
         }
         catch (Exception e) {
-            throw new PrestoException(HIVE_FILESYSTEM_ERROR, format("HDFS error reading from %s at position %s", name, position), e);
+            throw new PrestoException(HIVE_FILESYSTEM_ERROR, format("Error reading from %s at position %s", name, position), e);
         }
     }
 
-    public static HdfsParquetDataSource buildHdfsParquetDataSource(FileSystem fileSystem, Path path, long start, long length)
+    public static HdfsParquetDataSource buildHdfsParquetDataSource(FileSystem fileSystem, Path path, long start, long length, long fileSize, FileFormatDataSourceStats stats)
     {
         try {
-            long size = fileSystem.getFileStatus(path).getLen();
             FSDataInputStream inputStream = fileSystem.open(path);
-            return new HdfsParquetDataSource(path, size, inputStream);
+            return new HdfsParquetDataSource(path, fileSize, inputStream, stats);
         }
         catch (Exception e) {
             if (nullToEmpty(e.getMessage()).trim().equals("Filesystem closed") ||
@@ -104,5 +106,10 @@ public class HdfsParquetDataSource
             }
             throw new PrestoException(HIVE_CANNOT_OPEN_SPLIT, format("Error opening Hive split %s (offset=%s, length=%s): %s", path, start, length, e.getMessage()), e);
         }
+    }
+
+    public static HdfsParquetDataSource buildHdfsParquetDataSource(FSDataInputStream inputStream, Path path, long fileSize, FileFormatDataSourceStats stats)
+    {
+        return new HdfsParquetDataSource(path, fileSize, inputStream, stats);
     }
 }

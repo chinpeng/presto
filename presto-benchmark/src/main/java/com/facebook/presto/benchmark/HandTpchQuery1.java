@@ -109,21 +109,24 @@ public class HandTpchQuery1
         HashAggregationOperatorFactory aggregationOperator = new HashAggregationOperatorFactory(
                 2,
                 new PlanNodeId("test"),
-                ImmutableList.of(tpchQuery1Operator.getTypes().get(0), tpchQuery1Operator.getTypes().get(1)),
+                getColumnTypes("lineitem", "returnflag", "linestatus"),
                 Ints.asList(0, 1),
+                ImmutableList.of(),
                 Step.SINGLE,
                 ImmutableList.of(
-                        doubleSum.bind(ImmutableList.of(2), Optional.empty(), Optional.empty(), 1.0),
-                        doubleSum.bind(ImmutableList.of(3), Optional.empty(), Optional.empty(), 1.0),
-                        doubleSum.bind(ImmutableList.of(4), Optional.empty(), Optional.empty(), 1.0),
-                        longAverage.bind(ImmutableList.of(2), Optional.empty(), Optional.empty(), 1.0),
-                        doubleAverage.bind(ImmutableList.of(5), Optional.empty(), Optional.empty(), 1.0),
-                        doubleAverage.bind(ImmutableList.of(6), Optional.empty(), Optional.empty(), 1.0),
-                        countFunction.bind(ImmutableList.of(2), Optional.empty(), Optional.empty(), 1.0)
-                        ),
+                        doubleSum.bind(ImmutableList.of(2), Optional.empty()),
+                        doubleSum.bind(ImmutableList.of(3), Optional.empty()),
+                        doubleSum.bind(ImmutableList.of(4), Optional.empty()),
+                        longAverage.bind(ImmutableList.of(2), Optional.empty()),
+                        doubleAverage.bind(ImmutableList.of(5), Optional.empty()),
+                        doubleAverage.bind(ImmutableList.of(6), Optional.empty()),
+                        countFunction.bind(ImmutableList.of(2), Optional.empty())),
+                Optional.empty(),
                 Optional.empty(),
                 10_000,
-                new DataSize(16, MEGABYTE));
+                Optional.of(new DataSize(16, MEGABYTE)),
+                JOIN_COMPILER,
+                false);
 
         return ImmutableList.of(tableScanOperator, tpchQuery1Operator, aggregationOperator);
     }
@@ -131,7 +134,7 @@ public class HandTpchQuery1
     public static class TpchQuery1Operator
             implements com.facebook.presto.operator.Operator // TODO: use import when Java 7 compiler bug is fixed
     {
-        private static final ImmutableList<Type> TYPES = ImmutableList.<Type>of(
+        private static final ImmutableList<Type> TYPES = ImmutableList.of(
                 VARCHAR,
                 VARCHAR,
                 DOUBLE,
@@ -151,12 +154,6 @@ public class HandTpchQuery1
             }
 
             @Override
-            public List<Type> getTypes()
-            {
-                return TYPES;
-            }
-
-            @Override
             public Operator createOperator(DriverContext driverContext)
             {
                 OperatorContext operatorContext = driverContext.addOperatorContext(operatorId, new PlanNodeId("test"), TpchQuery1Operator.class.getSimpleName());
@@ -164,7 +161,7 @@ public class HandTpchQuery1
             }
 
             @Override
-            public void close()
+            public void noMoreOperators()
             {
             }
 
@@ -189,12 +186,6 @@ public class HandTpchQuery1
         public OperatorContext getOperatorContext()
         {
             return operatorContext;
-        }
-
-        @Override
-        public List<Type> getTypes()
-        {
-            return TYPES;
         }
 
         @Override

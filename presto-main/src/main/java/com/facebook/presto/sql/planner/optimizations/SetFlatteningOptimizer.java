@@ -14,11 +14,13 @@
 package com.facebook.presto.sql.planner.optimizations;
 
 import com.facebook.presto.Session;
-import com.facebook.presto.spi.type.Type;
+import com.facebook.presto.execution.warnings.WarningCollector;
 import com.facebook.presto.sql.planner.PlanNodeIdAllocator;
 import com.facebook.presto.sql.planner.Symbol;
 import com.facebook.presto.sql.planner.SymbolAllocator;
+import com.facebook.presto.sql.planner.TypeProvider;
 import com.facebook.presto.sql.planner.plan.AggregationNode;
+import com.facebook.presto.sql.planner.plan.ExceptNode;
 import com.facebook.presto.sql.planner.plan.IntersectNode;
 import com.facebook.presto.sql.planner.plan.PlanNode;
 import com.facebook.presto.sql.planner.plan.SetOperationNode;
@@ -37,7 +39,7 @@ public class SetFlatteningOptimizer
         implements PlanOptimizer
 {
     @Override
-    public PlanNode optimize(PlanNode plan, Session session, Map<Symbol, Type> types, SymbolAllocator symbolAllocator, PlanNodeIdAllocator idAllocator)
+    public PlanNode optimize(PlanNode plan, Session session, TypeProvider types, SymbolAllocator symbolAllocator, PlanNodeIdAllocator idAllocator, WarningCollector warningCollector)
     {
         requireNonNull(plan, "plan is null");
         requireNonNull(session, "session is null");
@@ -78,15 +80,26 @@ public class SetFlatteningOptimizer
             return new IntersectNode(node.getId(), flattenedSources.build(), flattenedSymbolMap.build(), ImmutableList.copyOf(flattenedSymbolMap.build().keySet()));
         }
 
-        private void flattenSetOperation(SetOperationNode node, RewriteContext<Boolean> context, ImmutableList.Builder<PlanNode> flattenedSources, ImmutableListMultimap.Builder<Symbol, Symbol> flattenedSymbolMap)
+        @Override
+        public PlanNode visitExcept(ExceptNode node, RewriteContext<Boolean> context)
+        {
+            ImmutableList.Builder<PlanNode> flattenedSources = ImmutableList.builder();
+            ImmutableListMultimap.Builder<Symbol, Symbol> flattenedSymbolMap = ImmutableListMultimap.builder();
+            flattenSetOperation(node, context, flattenedSources, flattenedSymbolMap);
+
+            return new ExceptNode(node.getId(), flattenedSources.build(), flattenedSymbolMap.build(), ImmutableList.copyOf(flattenedSymbolMap.build().keySet()));
+        }
+
+        private static void flattenSetOperation(SetOperationNode node, RewriteContext<Boolean> context, ImmutableList.Builder<PlanNode> flattenedSources, ImmutableListMultimap.Builder<Symbol, Symbol> flattenedSymbolMap)
         {
             for (int i = 0; i < node.getSources().size(); i++) {
                 PlanNode subplan = node.getSources().get(i);
                 PlanNode rewrittenSource = context.rewrite(subplan, context.get());
 
                 Class<?> setOperationClass = node.getClass();
-                if (setOperationClass.isInstance(rewrittenSource)) {
+                if (setOperationClass.isInstance(rewrittenSource) && (!setOperationClass.equals(ExceptNode.class) || i == 0)) {
                     // Absorb source's subplans if it is also a SetOperation of the same type
+                    // ExceptNodes can only flatten their first source because except is not associative
                     SetOperationNode rewrittenSetOperation = (SetOperationNode) rewrittenSource;
                     flattenedSources.addAll(rewrittenSetOperation.getSources());
                     for (Map.Entry<Symbol, Collection<Symbol>> entry : node.getSymbolMapping().asMap().entrySet()) {
@@ -118,15 +131,12 @@ public class SetFlatteningOptimizer
             return new AggregationNode(
                     node.getId(),
                     rewrittenNode,
-                    node.getGroupBy(),
                     node.getAggregations(),
-                    node.getFunctions(),
-                    node.getMasks(),
                     node.getGroupingSets(),
+                    ImmutableList.of(),
                     node.getStep(),
-                    node.getSampleWeight(),
-                    node.getConfidence(),
-                    node.getHashSymbol());
+                    node.getHashSymbol(),
+                    node.getGroupIdSymbol());
         }
 
         private static boolean isDistinctOperator(AggregationNode node)

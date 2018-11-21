@@ -13,10 +13,10 @@
  */
 package com.facebook.presto.operator.aggregation;
 
-import com.facebook.presto.bytecode.DynamicClassLoader;
 import com.facebook.presto.metadata.BoundVariables;
 import com.facebook.presto.metadata.FunctionRegistry;
 import com.facebook.presto.metadata.SqlAggregationFunction;
+import com.facebook.presto.operator.aggregation.AggregationMetadata.AccumulatorStateDescriptor;
 import com.facebook.presto.operator.aggregation.state.LongState;
 import com.facebook.presto.operator.aggregation.state.StateCompiler;
 import com.facebook.presto.spi.block.Block;
@@ -27,6 +27,7 @@ import com.facebook.presto.spi.type.StandardTypes;
 import com.facebook.presto.spi.type.Type;
 import com.facebook.presto.spi.type.TypeManager;
 import com.google.common.collect.ImmutableList;
+import io.airlift.bytecode.DynamicClassLoader;
 
 import java.lang.invoke.MethodHandle;
 import java.util.List;
@@ -39,8 +40,8 @@ import static com.facebook.presto.operator.aggregation.AggregationMetadata.Param
 import static com.facebook.presto.operator.aggregation.AggregationUtils.generateAggregationName;
 import static com.facebook.presto.spi.type.BigintType.BIGINT;
 import static com.facebook.presto.spi.type.TypeSignature.parseTypeSignature;
-import static com.facebook.presto.util.ImmutableCollectors.toImmutableList;
 import static com.facebook.presto.util.Reflection.methodHandle;
+import static com.google.common.collect.ImmutableList.toImmutableList;
 
 public class CountColumn
         extends SqlAggregationFunction
@@ -77,8 +78,8 @@ public class CountColumn
     {
         DynamicClassLoader classLoader = new DynamicClassLoader(CountColumn.class.getClassLoader());
 
-        AccumulatorStateSerializer<LongState> stateSerializer = new StateCompiler().generateStateSerializer(LongState.class, classLoader);
-        AccumulatorStateFactory<LongState> stateFactory = new StateCompiler().generateStateFactory(LongState.class, classLoader);
+        AccumulatorStateSerializer<LongState> stateSerializer = StateCompiler.generateStateSerializer(LongState.class, classLoader);
+        AccumulatorStateFactory<LongState> stateFactory = StateCompiler.generateStateFactory(LongState.class, classLoader);
         Type intermediateType = stateSerializer.getSerializedType();
 
         List<Type> inputTypes = ImmutableList.of(type);
@@ -89,14 +90,14 @@ public class CountColumn
                 INPUT_FUNCTION,
                 COMBINE_FUNCTION,
                 OUTPUT_FUNCTION,
-                LongState.class,
-                stateSerializer,
-                stateFactory,
-                BIGINT,
-                false);
+                ImmutableList.of(new AccumulatorStateDescriptor(
+                        LongState.class,
+                        stateSerializer,
+                        stateFactory)),
+                BIGINT);
 
-        GenericAccumulatorFactoryBinder factory = new AccumulatorCompiler().generateAccumulatorFactoryBinder(metadata, classLoader);
-        return new InternalAggregationFunction(NAME, inputTypes, intermediateType, BIGINT, true, false, factory);
+        GenericAccumulatorFactoryBinder factory = AccumulatorCompiler.generateAccumulatorFactoryBinder(metadata, classLoader);
+        return new InternalAggregationFunction(NAME, inputTypes, ImmutableList.of(intermediateType), BIGINT, true, false, factory);
     }
 
     private static List<ParameterMetadata> createInputParameterMetadata(Type type)

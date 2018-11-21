@@ -13,32 +13,32 @@
  */
 package com.facebook.presto.execution;
 
+import com.facebook.presto.spi.PrestoException;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
+import com.google.common.util.concurrent.ListenableFuture;
 import io.airlift.log.Logger;
-import io.airlift.units.Duration;
 
-import javax.annotation.Nonnull;
 import javax.annotation.concurrent.GuardedBy;
 import javax.annotation.concurrent.ThreadSafe;
 
 import java.util.ArrayList;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
-import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Predicate;
 
+import static com.facebook.presto.spi.StandardErrorCode.SERVER_SHUTTING_DOWN;
 import static com.google.common.base.Preconditions.checkState;
+import static com.google.common.util.concurrent.Futures.immediateFuture;
 import static java.util.Objects.requireNonNull;
-import static java.util.concurrent.TimeUnit.NANOSECONDS;
 
 /**
- * Simple state machine which holds a single state.  Callers can register for
- * state change events, and can wait for the state to change.
+ * Simple state machine which holds a single state. Callers can register for state change events.
  */
 @ThreadSafe
 public class StateMachine<T>
@@ -86,7 +86,8 @@ public class StateMachine<T>
         this.terminalStates = ImmutableSet.copyOf(requireNonNull(terminalStates, "terminalStates is null"));
     }
 
-    @Nonnull
+    // state changes are atomic and state is volatile, so a direct read is safe here
+    @SuppressWarnings("FieldAccessNotGuarded")
     public T get()
     {
         return state;
@@ -98,7 +99,6 @@ public class StateMachine<T>
      *
      * @return the old state
      */
-    @Nonnull
     public T set(T newState)
     {
         checkState(!Thread.holdsLock(lock), "Can not set state while holding the lock");
@@ -124,8 +124,6 @@ public class StateMachine<T>
             if (isTerminalState(state)) {
                 this.stateChangeListeners.clear();
             }
-
-            lock.notifyAll();
         }
 
         fireStateChanged(newState, futureStateChange, stateChangeListeners);
@@ -199,8 +197,6 @@ public class StateMachine<T>
             if (isTerminalState(state)) {
                 this.stateChangeListeners.clear();
             }
-
-            lock.notifyAll();
         }
 
         fireStateChanged(newState, futureStateChange, stateChangeListeners);
@@ -212,7 +208,8 @@ public class StateMachine<T>
         checkState(!Thread.holdsLock(lock), "Can not fire state change event while holding the lock");
         requireNonNull(newState, "newState is null");
 
-        executor.execute(() -> {
+        // always fire listener callbacks from a different thread
+        safeExecute(() -> {
             checkState(!Thread.holdsLock(lock), "Can not notify while holding the lock");
             try {
                 futureStateChange.complete(newState);
@@ -221,28 +218,33 @@ public class StateMachine<T>
                 log.error(e, "Error setting future state for %s", name);
             }
             for (StateChangeListener<T> stateChangeListener : stateChangeListeners) {
-                try {
-                    stateChangeListener.stateChanged(newState);
-                }
-                catch (Throwable e) {
-                    log.error(e, "Error notifying state change listener for %s", name);
-                }
+                fireStateChangedListener(newState, stateChangeListener);
             }
         });
+    }
+
+    private void fireStateChangedListener(T newState, StateChangeListener<T> stateChangeListener)
+    {
+        try {
+            stateChangeListener.stateChanged(newState);
+        }
+        catch (Throwable e) {
+            log.error(e, "Error notifying state change listener for %s", name);
+        }
     }
 
     /**
      * Gets a future that completes when the state is no longer {@code .equals()} to {@code currentState)}.
      */
-    public CompletableFuture<T> getStateChange(T currentState)
+    public ListenableFuture<T> getStateChange(T currentState)
     {
         checkState(!Thread.holdsLock(lock), "Can not wait for state change while holding the lock");
         requireNonNull(currentState, "currentState is null");
 
         synchronized (lock) {
             // return a completed future if the state has already changed, or we are in a terminal state
-            if (isPossibleStateChange(currentState)) {
-                return CompletableFuture.completedFuture(state);
+            if (!state.equals(currentState) || isTerminalState(state)) {
+                return immediateFuture(state);
             }
 
             return futureStateChange.get().createNewListener();
@@ -266,46 +268,11 @@ public class StateMachine<T>
 
         // state machine will never transition from a terminal state, so fire state change immediately
         if (inTerminalState) {
-            stateChangeListener.stateChanged(state);
+            // always fire listener callbacks from a different thread
+            // the direct access of state is ok here, because we always want to notify listeners of the most recent value
+            //noinspection FieldAccessNotGuarded
+            safeExecute(() -> stateChangeListener.stateChanged(state));
         }
-    }
-
-    /**
-     * Wait for the state to not be {@code .equals()} to the specified current state.
-     */
-    public Duration waitForStateChange(T currentState, Duration maxWait)
-            throws InterruptedException
-    {
-        checkState(!Thread.holdsLock(lock), "Can not wait for state change while holding the lock");
-        requireNonNull(currentState, "currentState is null");
-        requireNonNull(maxWait, "maxWait is null");
-
-        // don't wait if the state has already changed, or we are in a terminal state
-        if (isPossibleStateChange(currentState)) {
-            return maxWait;
-        }
-
-        // wait for task state to change
-        long remainingNanos = maxWait.roundTo(NANOSECONDS);
-        long start = System.nanoTime();
-        long end = start + remainingNanos;
-
-        synchronized (lock) {
-            while (remainingNanos > 0 && !isPossibleStateChange(currentState)) {
-                // wait for timeout or notification
-                NANOSECONDS.timedWait(lock, remainingNanos);
-                remainingNanos = end - System.nanoTime();
-            }
-        }
-        if (remainingNanos < 0) {
-            remainingNanos = 0;
-        }
-        return new Duration(remainingNanos, NANOSECONDS);
-    }
-
-    private boolean isPossibleStateChange(T currentState)
-    {
-        return !state.equals(currentState) || isTerminalState(state);
     }
 
     @VisibleForTesting
@@ -315,9 +282,11 @@ public class StateMachine<T>
     }
 
     @VisibleForTesting
-    synchronized List<StateChangeListener<T>> getStateChangeListeners()
+    List<StateChangeListener<T>> getStateChangeListeners()
     {
-        return ImmutableList.copyOf(stateChangeListeners);
+        synchronized (lock) {
+            return ImmutableList.copyOf(stateChangeListeners);
+        }
     }
 
     public interface StateChangeListener<T>
@@ -331,38 +300,16 @@ public class StateMachine<T>
         return get().toString();
     }
 
-    private static class FutureStateChange<T>
+    private void safeExecute(Runnable command)
     {
-        // Use a separate future for each listener so canceled listeners can be removed
-        @GuardedBy("this")
-        private final Set<CompletableFuture<T>> listeners = new HashSet<>();
-
-        public synchronized CompletableFuture<T> createNewListener()
-        {
-            CompletableFuture<T> listener = new CompletableFuture<>();
-            listeners.add(listener);
-
-            // remove the listener when the future completes
-            listener.whenComplete((t, throwable) -> {
-                synchronized (FutureStateChange.this) {
-                    listeners.remove(listener);
-                }
-            });
-
-            return listener;
+        try {
+            executor.execute(command);
         }
-
-        public void complete(T newState)
-        {
-            Set<CompletableFuture<T>> futures;
-            synchronized (this) {
-                futures = ImmutableSet.copyOf(listeners);
-                listeners.clear();
+        catch (RejectedExecutionException e) {
+            if ((executor instanceof ExecutorService) && ((ExecutorService) executor).isShutdown()) {
+                throw new PrestoException(SERVER_SHUTTING_DOWN, "Server is shutting down", e);
             }
-
-            for (CompletableFuture<T> future : futures) {
-                future.complete(newState);
-            }
+            throw e;
         }
     }
 }

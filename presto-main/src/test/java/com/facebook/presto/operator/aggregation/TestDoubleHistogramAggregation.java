@@ -20,15 +20,14 @@ import com.facebook.presto.spi.Page;
 import com.facebook.presto.spi.PageBuilder;
 import com.facebook.presto.spi.PrestoException;
 import com.facebook.presto.spi.block.Block;
+import com.facebook.presto.spi.type.MapType;
 import com.facebook.presto.spi.type.StandardTypes;
 import com.facebook.presto.sql.analyzer.FeaturesConfig;
-import com.facebook.presto.type.MapType;
 import com.facebook.presto.type.TypeRegistry;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Maps;
 import org.testng.annotations.Test;
 
-import java.io.IOException;
 import java.util.Map;
 import java.util.Optional;
 
@@ -38,6 +37,7 @@ import static com.facebook.presto.operator.aggregation.AggregationTestUtils.getI
 import static com.facebook.presto.spi.type.BigintType.BIGINT;
 import static com.facebook.presto.spi.type.DoubleType.DOUBLE;
 import static com.facebook.presto.spi.type.TypeSignature.parseTypeSignature;
+import static com.facebook.presto.util.StructuralTestUtil.mapType;
 import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertTrue;
 
@@ -49,7 +49,7 @@ public class TestDoubleHistogramAggregation
     public TestDoubleHistogramAggregation()
     {
         TypeRegistry typeRegistry = new TypeRegistry();
-        FunctionRegistry functionRegistry = new FunctionRegistry(typeRegistry, new BlockEncodingManager(typeRegistry), new FeaturesConfig().setExperimentalSyntaxEnabled(true));
+        FunctionRegistry functionRegistry = new FunctionRegistry(typeRegistry, new BlockEncodingManager(typeRegistry), new FeaturesConfig());
         InternalAggregationFunction function = functionRegistry.getAggregateFunctionImplementation(
                 new Signature("numeric_histogram",
                         AGGREGATE,
@@ -57,14 +57,13 @@ public class TestDoubleHistogramAggregation
                         parseTypeSignature(StandardTypes.BIGINT),
                         parseTypeSignature(StandardTypes.DOUBLE),
                         parseTypeSignature(StandardTypes.DOUBLE)));
-        factory = function.bind(ImmutableList.of(0, 1, 2), Optional.empty(), Optional.empty(), 1.0);
+        factory = function.bind(ImmutableList.of(0, 1, 2), Optional.empty());
 
         input = makeInput(10);
     }
 
     @Test
     public void test()
-            throws Exception
     {
         Accumulator singleStep = factory.createAccumulator();
         singleStep.addInput(input);
@@ -83,7 +82,6 @@ public class TestDoubleHistogramAggregation
 
     @Test
     public void testMerge()
-            throws Exception
     {
         Accumulator singleStep = factory.createAccumulator();
         singleStep.addInput(input);
@@ -106,7 +104,6 @@ public class TestDoubleHistogramAggregation
 
     @Test
     public void testNull()
-            throws Exception
     {
         Accumulator accumulator = factory.createAccumulator();
         Block result = getFinalBlock(accumulator);
@@ -124,13 +121,12 @@ public class TestDoubleHistogramAggregation
     }
 
     private static Map<Double, Double> extractSingleValue(Block block)
-            throws IOException
     {
-        MapType mapType = new MapType(DOUBLE, DOUBLE);
+        MapType mapType = mapType(DOUBLE, DOUBLE);
         return (Map<Double, Double>) mapType.getObjectValue(null, block, 0);
     }
 
-    private Page makeInput(int numberOfBuckets)
+    private static Page makeInput(int numberOfBuckets)
     {
         PageBuilder builder = new PageBuilder(ImmutableList.of(BIGINT, DOUBLE, DOUBLE));
 

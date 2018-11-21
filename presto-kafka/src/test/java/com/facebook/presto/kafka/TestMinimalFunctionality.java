@@ -18,6 +18,7 @@ import com.facebook.presto.kafka.util.EmbeddedKafka;
 import com.facebook.presto.kafka.util.TestUtils;
 import com.facebook.presto.metadata.QualifiedObjectName;
 import com.facebook.presto.metadata.TableHandle;
+import com.facebook.presto.security.AllowAllAccessControl;
 import com.facebook.presto.spi.SchemaTableName;
 import com.facebook.presto.spi.type.BigintType;
 import com.facebook.presto.testing.MaterializedResult;
@@ -37,8 +38,8 @@ import java.util.UUID;
 import static com.facebook.presto.kafka.util.EmbeddedKafka.CloseableProducer;
 import static com.facebook.presto.kafka.util.TestUtils.createEmptyTopicDescription;
 import static com.facebook.presto.testing.TestingSession.testSessionBuilder;
+import static com.facebook.presto.testing.assertions.Assert.assertEquals;
 import static com.facebook.presto.transaction.TransactionBuilder.transaction;
-import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertTrue;
 
 @Test(singleThreaded = true)
@@ -61,11 +62,12 @@ public class TestMinimalFunctionality
         embeddedKafka.start();
     }
 
-    @AfterClass
+    @AfterClass(alwaysRun = true)
     public void stopKafka()
             throws Exception
     {
         embeddedKafka.close();
+        embeddedKafka = null;
     }
 
     @BeforeMethod
@@ -85,11 +87,11 @@ public class TestMinimalFunctionality
                         .build());
     }
 
-    @AfterMethod
+    @AfterMethod(alwaysRun = true)
     public void tearDown()
-            throws Exception
     {
         queryRunner.close();
+        queryRunner = null;
     }
 
     private void createMessages(String topicName, int count)
@@ -104,11 +106,10 @@ public class TestMinimalFunctionality
 
     @Test
     public void testTopicExists()
-            throws Exception
     {
         QualifiedObjectName name = new QualifiedObjectName("kafka", "default", topicName);
 
-        transaction(queryRunner.getTransactionManager())
+        transaction(queryRunner.getTransactionManager(), new AllowAllAccessControl())
                 .singleStatement()
                 .execute(SESSION, session -> {
                     Optional<TableHandle> handle = queryRunner.getServer().getMetadata().getTableHandle(session, name);
@@ -118,7 +119,6 @@ public class TestMinimalFunctionality
 
     @Test
     public void testTopicHasData()
-            throws Exception
     {
         MaterializedResult result = queryRunner.execute("SELECT count(1) from " + topicName);
 

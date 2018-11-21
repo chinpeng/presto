@@ -24,6 +24,7 @@ import com.facebook.presto.sql.planner.plan.PlanNode;
 import com.facebook.presto.sql.planner.plan.PlanVisitor;
 import com.facebook.presto.sql.planner.plan.RemoteSourceNode;
 import com.facebook.presto.sql.planner.plan.SemiJoinNode;
+import com.facebook.presto.sql.planner.plan.SpatialJoinNode;
 import com.facebook.presto.sql.planner.plan.UnionNode;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableList;
@@ -39,12 +40,13 @@ import java.util.Set;
 
 import static com.facebook.presto.execution.StageState.RUNNING;
 import static com.facebook.presto.execution.StageState.SCHEDULED;
-import static com.facebook.presto.util.ImmutableCollectors.toImmutableList;
-import static com.facebook.presto.util.ImmutableCollectors.toImmutableMap;
-import static com.facebook.presto.util.ImmutableCollectors.toImmutableSet;
 import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.collect.ImmutableList.toImmutableList;
+import static com.google.common.collect.ImmutableMap.toImmutableMap;
+import static com.google.common.collect.ImmutableSet.toImmutableSet;
 import static com.google.common.collect.Iterables.getOnlyElement;
 import static java.util.Objects.requireNonNull;
+import static java.util.function.Function.identity;
 
 public class AllAtOnceExecutionSchedule
         implements ExecutionSchedule
@@ -113,7 +115,7 @@ public class AllAtOnceExecutionSchedule
         public Visitor(Collection<PlanFragment> fragments)
         {
             this.fragments = fragments.stream()
-                    .collect(toImmutableMap(PlanFragment::getId));
+                    .collect(toImmutableMap(PlanFragment::getId, identity()));
         }
 
         public List<PlanFragmentId> getSchedulerOrder()
@@ -124,7 +126,7 @@ public class AllAtOnceExecutionSchedule
         public void processFragment(PlanFragmentId planFragmentId)
         {
             PlanFragment planFragment = fragments.get(planFragmentId);
-            checkArgument(planFragment != null, "Fragment not found: " + planFragmentId);
+            checkArgument(planFragment != null, "Fragment not found: %s", planFragmentId);
 
             planFragment.getRoot().accept(this, null);
             schedulerOrder.add(planFragmentId);
@@ -143,6 +145,14 @@ public class AllAtOnceExecutionSchedule
         {
             node.getFilteringSource().accept(this, context);
             node.getSource().accept(this, context);
+            return null;
+        }
+
+        @Override
+        public Void visitSpatialJoin(SpatialJoinNode node, Void context)
+        {
+            node.getRight().accept(this, context);
+            node.getLeft().accept(this, context);
             return null;
         }
 

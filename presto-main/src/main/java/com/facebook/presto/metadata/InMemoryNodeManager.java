@@ -14,6 +14,7 @@
 package com.facebook.presto.metadata;
 
 import com.facebook.presto.client.NodeVersion;
+import com.facebook.presto.connector.ConnectorId;
 import com.facebook.presto.spi.Node;
 import com.facebook.presto.spi.NodeState;
 import com.google.common.collect.HashMultimap;
@@ -22,16 +23,25 @@ import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Multimaps;
 import com.google.common.collect.SetMultimap;
 
+import javax.annotation.concurrent.GuardedBy;
 import javax.inject.Inject;
 
 import java.net.URI;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Set;
+import java.util.function.Consumer;
+
+import static java.util.Objects.requireNonNull;
 
 public class InMemoryNodeManager
         implements InternalNodeManager
 {
     private final Node localNode;
-    private final SetMultimap<String, Node> remoteNodes = Multimaps.synchronizedSetMultimap(HashMultimap.<String, Node>create());
+    private final SetMultimap<ConnectorId, Node> remoteNodes = Multimaps.synchronizedSetMultimap(HashMultimap.create());
+
+    @GuardedBy("this")
+    private final List<Consumer<AllNodes>> listeners = new ArrayList<>();
 
     @Inject
     public InMemoryNodeManager()
@@ -41,22 +51,29 @@ public class InMemoryNodeManager
 
     public InMemoryNodeManager(URI localUri)
     {
-        localNode = new PrestoNode("local", localUri, NodeVersion.UNKNOWN);
+        localNode = new PrestoNode("local", localUri, NodeVersion.UNKNOWN, false);
     }
 
-    public void addCurrentNodeDatasource(String datasourceName)
+    public void addCurrentNodeConnector(ConnectorId connectorId)
     {
-        addNode(datasourceName, localNode);
+        addNode(connectorId, localNode);
     }
 
-    public void addNode(String datasourceName, Node... nodes)
+    public void addNode(ConnectorId connectorId, Node... nodes)
     {
-        addNode(datasourceName, ImmutableList.copyOf(nodes));
+        addNode(connectorId, ImmutableList.copyOf(nodes));
     }
 
-    public void addNode(String datasourceName, Iterable<Node> nodes)
+    public void addNode(ConnectorId connectorId, Iterable<Node> nodes)
     {
-        remoteNodes.putAll(datasourceName, nodes);
+        remoteNodes.putAll(connectorId, nodes);
+
+        List<Consumer<AllNodes>> listeners;
+        synchronized (this) {
+            listeners = ImmutableList.copyOf(this.listeners);
+        }
+        AllNodes allNodes = getAllNodes();
+        listeners.forEach(listener -> listener.accept(allNodes));
     }
 
     @Override
@@ -75,15 +92,15 @@ public class InMemoryNodeManager
     }
 
     @Override
-    public Set<Node> getActiveDatasourceNodes(String datasourceName)
+    public Set<Node> getActiveConnectorNodes(ConnectorId connectorId)
     {
-        return ImmutableSet.copyOf(remoteNodes.get(datasourceName));
+        return ImmutableSet.copyOf(remoteNodes.get(connectorId));
     }
 
     @Override
     public AllNodes getAllNodes()
     {
-        return new AllNodes(ImmutableSet.<Node>builder().add(localNode).addAll(remoteNodes.values()).build(), ImmutableSet.<Node>of(), ImmutableSet.<Node>of());
+        return new AllNodes(ImmutableSet.<Node>builder().add(localNode).addAll(remoteNodes.values()).build(), ImmutableSet.of(), ImmutableSet.of(), ImmutableSet.of(localNode));
     }
 
     @Override
@@ -103,5 +120,17 @@ public class InMemoryNodeManager
     public void refreshNodes()
     {
         // no-op
+    }
+
+    @Override
+    public synchronized void addNodeChangeListener(Consumer<AllNodes> listener)
+    {
+        listeners.add(requireNonNull(listener, "listener is null"));
+    }
+
+    @Override
+    public synchronized void removeNodeChangeListener(Consumer<AllNodes> listener)
+    {
+        listeners.remove(requireNonNull(listener, "listener is null"));
     }
 }

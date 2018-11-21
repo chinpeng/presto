@@ -45,7 +45,9 @@ import static com.facebook.presto.spi.type.VarcharType.VARCHAR;
 import static com.google.common.collect.Iterables.getOnlyElement;
 import static io.airlift.units.Duration.nanosSince;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
+import static java.util.concurrent.TimeUnit.MINUTES;
 import static java.util.stream.Collectors.toSet;
+import static org.joda.time.DateTimeZone.UTC;
 import static org.testng.Assert.assertEquals;
 
 @Test(singleThreaded = true)
@@ -56,10 +58,11 @@ public class TestShardOrganizationManager
     private MetadataDao metadataDao;
     private ShardOrganizerDao organizerDao;
 
-    private static final Table tableInfo = new Table(1L, OptionalLong.empty(), OptionalInt.empty(), OptionalLong.empty());
-    private static final Table temporalTableInfo = new Table(1L, OptionalLong.empty(), OptionalInt.empty(), OptionalLong.of(1));
+    private static final Table tableInfo = new Table(1L, OptionalLong.empty(), Optional.empty(), OptionalInt.empty(), OptionalLong.empty(), true);
+    private static final Table temporalTableInfo = new Table(1L, OptionalLong.empty(), Optional.empty(), OptionalInt.empty(), OptionalLong.of(1), true);
 
     private static final List<Type> types = ImmutableList.of(BIGINT, VARCHAR, DATE, TIMESTAMP);
+    private static final TemporalFunction TEMPORAL_FUNCTION = new TemporalFunction(UTC);
 
     @BeforeMethod
     public void setup()
@@ -80,7 +83,6 @@ public class TestShardOrganizationManager
 
     @Test
     public void testOrganizationEligibleTables()
-            throws Exception
     {
         long table1 = metadataDao.insertTable("schema", "table1", false, true, null, 0);
         metadataDao.insertColumn(table1, 1, "foo", 1, "bigint", 1, null);
@@ -110,8 +112,9 @@ public class TestShardOrganizationManager
         assertEquals(actual, ImmutableSet.of(table1, table2));
 
         // update the start times and test that the tables are discovered after interval seconds
-        organizerDao.updateLastStartTime("node1", table1, System.currentTimeMillis());
-        organizerDao.updateLastStartTime("node1", table2, System.currentTimeMillis());
+        long updateTime = System.currentTimeMillis();
+        organizerDao.updateLastStartTime("node1", table1, updateTime);
+        organizerDao.updateLastStartTime("node1", table2, updateTime);
 
         // wait for some time (interval time) for the tables to be eligible for organization
         long start = System.nanoTime();
@@ -124,18 +127,16 @@ public class TestShardOrganizationManager
 
     @Test
     public void testSimple()
-            throws Exception
     {
         long timestamp = 1L;
         int day = 1;
 
         List<ShardIndexInfo> shards = ImmutableList.of(
-                shardWithRange(1, ShardRange.of(new Tuple(types, 5L, "hello", day, timestamp), new Tuple(types, 10L, "hello", day, timestamp))),
-                shardWithRange(1, ShardRange.of(new Tuple(types, 7L, "hello", day, timestamp), new Tuple(types, 10L, "hello", day, timestamp))),
-                shardWithRange(1, ShardRange.of(new Tuple(types, 6L, "hello", day, timestamp), new Tuple(types, 9L, "hello", day, timestamp))),
-                shardWithRange(1, ShardRange.of(new Tuple(types, 1L, "hello", day, timestamp), new Tuple(types, 5L, "hello", day, timestamp))));
-
-        Set<OrganizationSet> actual = createOrganizationSets(tableInfo, shards);
+                shardWithSortRange(1, ShardRange.of(new Tuple(types, 5L, "hello", day, timestamp), new Tuple(types, 10L, "hello", day, timestamp))),
+                shardWithSortRange(1, ShardRange.of(new Tuple(types, 7L, "hello", day, timestamp), new Tuple(types, 10L, "hello", day, timestamp))),
+                shardWithSortRange(1, ShardRange.of(new Tuple(types, 6L, "hello", day, timestamp), new Tuple(types, 9L, "hello", day, timestamp))),
+                shardWithSortRange(1, ShardRange.of(new Tuple(types, 1L, "hello", day, timestamp), new Tuple(types, 5L, "hello", day, timestamp))));
+        Set<OrganizationSet> actual = createOrganizationSets(TEMPORAL_FUNCTION, tableInfo, shards);
 
         assertEquals(actual.size(), 1);
         // Shards 0, 1 and 2 are overlapping, so we should get an organization set with these shards
@@ -144,7 +145,6 @@ public class TestShardOrganizationManager
 
     @Test
     public void testSimpleTemporal()
-            throws Exception
     {
         List<Type> temporalType = ImmutableList.of(DATE);
         List<Type> types = ImmutableList.of(BIGINT);
@@ -160,7 +160,7 @@ public class TestShardOrganizationManager
                 shardWithTemporalRange(1, ShardRange.of(new Tuple(types, 6L), new Tuple(types, 9L)), ShardRange.of(new Tuple(temporalType, day1), new Tuple(temporalType, day2))),
                 shardWithTemporalRange(1, ShardRange.of(new Tuple(types, 4L), new Tuple(types, 8L)), ShardRange.of(new Tuple(temporalType, day4), new Tuple(temporalType, day5))));
 
-        Set<OrganizationSet> organizationSets = createOrganizationSets(temporalTableInfo, shards);
+        Set<OrganizationSet> organizationSets = createOrganizationSets(TEMPORAL_FUNCTION, temporalTableInfo, shards);
         Set<Set<UUID>> actual = organizationSets.stream()
                 .map(OrganizationSet::getShards)
                 .collect(toSet());
@@ -170,7 +170,7 @@ public class TestShardOrganizationManager
         assertEquals(actual, ImmutableSet.of(extractIndexes(shards, 0, 2), extractIndexes(shards, 1, 3)));
     }
 
-    private static ShardIndexInfo shardWithRange(int bucketNumber, ShardRange shardRange)
+    private static ShardIndexInfo shardWithSortRange(int bucketNumber, ShardRange sortRange)
     {
         return new ShardIndexInfo(
                 1,
@@ -178,11 +178,11 @@ public class TestShardOrganizationManager
                 UUID.randomUUID(),
                 1,
                 1,
-                Optional.of(shardRange),
+                Optional.of(sortRange),
                 Optional.empty());
     }
 
-    private static ShardIndexInfo shardWithTemporalRange(int bucketNumber, ShardRange shardRange, ShardRange temporalRange)
+    private static ShardIndexInfo shardWithTemporalRange(int bucketNumber, ShardRange sortRange, ShardRange temporalRange)
     {
         return new ShardIndexInfo(
                 1,
@@ -190,12 +190,19 @@ public class TestShardOrganizationManager
                 UUID.randomUUID(),
                 1,
                 1,
-                Optional.of(shardRange),
+                Optional.of(sortRange),
                 Optional.of(temporalRange));
     }
 
     private ShardOrganizationManager createShardOrganizationManager(long intervalMillis)
     {
-        return new ShardOrganizationManager(dbi, "node1", createShardManager(dbi), createShardOrganizer(), true, new Duration(intervalMillis, MILLISECONDS));
+        return new ShardOrganizationManager(dbi,
+                "node1",
+                createShardManager(dbi),
+                createShardOrganizer(),
+                TEMPORAL_FUNCTION,
+                true,
+                new Duration(intervalMillis, MILLISECONDS),
+                new Duration(5, MINUTES));
     }
 }

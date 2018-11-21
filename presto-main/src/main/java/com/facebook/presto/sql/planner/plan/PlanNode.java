@@ -45,6 +45,7 @@ import static java.util.Objects.requireNonNull;
         @JsonSubTypes.Type(value = RemoteSourceNode.class, name = "remoteSource"),
         @JsonSubTypes.Type(value = JoinNode.class, name = "join"),
         @JsonSubTypes.Type(value = SemiJoinNode.class, name = "semijoin"),
+        @JsonSubTypes.Type(value = SpatialJoinNode.class, name = "spatialjoin"),
         @JsonSubTypes.Type(value = IndexJoinNode.class, name = "indexjoin"),
         @JsonSubTypes.Type(value = IndexSourceNode.class, name = "indexsource"),
         @JsonSubTypes.Type(value = TableWriterNode.class, name = "tablewriter"),
@@ -59,7 +60,8 @@ import static java.util.Objects.requireNonNull;
         @JsonSubTypes.Type(value = GroupIdNode.class, name = "groupid"),
         @JsonSubTypes.Type(value = ExplainAnalyzeNode.class, name = "explainAnalyze"),
         @JsonSubTypes.Type(value = ApplyNode.class, name = "apply"),
-})
+        @JsonSubTypes.Type(value = AssignUniqueId.class, name = "assignUniqueId"),
+        @JsonSubTypes.Type(value = LateralJoinNode.class, name = "lateralJoin")})
 public abstract class PlanNode
 {
     private final PlanNodeId id;
@@ -80,7 +82,9 @@ public abstract class PlanNode
 
     public abstract List<Symbol> getOutputSymbols();
 
-    public <C, R> R accept(PlanVisitor<C, R> visitor, C context)
+    public abstract PlanNode replaceChildren(List<PlanNode> newChildren);
+
+    public <R, C> R accept(PlanVisitor<R, C> visitor, C context)
     {
         return visitor.visitPlan(this, context);
     }

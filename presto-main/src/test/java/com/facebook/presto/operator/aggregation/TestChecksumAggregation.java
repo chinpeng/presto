@@ -16,20 +16,23 @@ package com.facebook.presto.operator.aggregation;
 import com.facebook.presto.metadata.MetadataManager;
 import com.facebook.presto.metadata.Signature;
 import com.facebook.presto.spi.block.Block;
+import com.facebook.presto.spi.type.ArrayType;
 import com.facebook.presto.spi.type.BigintType;
 import com.facebook.presto.spi.type.BooleanType;
+import com.facebook.presto.spi.type.DecimalType;
 import com.facebook.presto.spi.type.DoubleType;
 import com.facebook.presto.spi.type.SqlVarbinary;
 import com.facebook.presto.spi.type.Type;
 import com.facebook.presto.spi.type.VarbinaryType;
 import com.facebook.presto.spi.type.VarcharType;
-import com.facebook.presto.type.ArrayType;
 import org.testng.annotations.Test;
 
 import static com.facebook.presto.block.BlockAssertions.createArrayBigintBlock;
 import static com.facebook.presto.block.BlockAssertions.createBooleansBlock;
 import static com.facebook.presto.block.BlockAssertions.createDoublesBlock;
+import static com.facebook.presto.block.BlockAssertions.createLongDecimalsBlock;
 import static com.facebook.presto.block.BlockAssertions.createLongsBlock;
+import static com.facebook.presto.block.BlockAssertions.createShortDecimalsBlock;
 import static com.facebook.presto.block.BlockAssertions.createStringsBlock;
 import static com.facebook.presto.metadata.FunctionKind.AGGREGATE;
 import static com.facebook.presto.operator.aggregation.AggregationTestUtils.assertAggregation;
@@ -49,19 +52,17 @@ public class TestChecksumAggregation
 
     @Test
     public void testEmpty()
-            throws Exception
     {
         InternalAggregationFunction booleanAgg = metadata.getFunctionRegistry().getAggregateFunctionImplementation(
                 new Signature("checksum",
                         AGGREGATE,
                         parseTypeSignature(VARBINARY),
                         parseTypeSignature(BOOLEAN)));
-        assertAggregation(booleanAgg, 1.0, null, createBooleansBlock());
+        assertAggregation(booleanAgg, null, createBooleansBlock());
     }
 
     @Test
     public void testBoolean()
-        throws Exception
     {
         InternalAggregationFunction booleanAgg = metadata.getFunctionRegistry().getAggregateFunctionImplementation(
                 new Signature("checksum",
@@ -69,12 +70,11 @@ public class TestChecksumAggregation
                         parseTypeSignature(VARBINARY),
                         parseTypeSignature(BOOLEAN)));
         Block block = createBooleansBlock(null, null, true, false, false);
-        assertAggregation(booleanAgg, 1.0, expectedChecksum(BooleanType.BOOLEAN, block), block);
+        assertAggregation(booleanAgg, expectedChecksum(BooleanType.BOOLEAN, block), block);
     }
 
     @Test
     public void testLong()
-            throws Exception
     {
         InternalAggregationFunction longAgg = metadata.getFunctionRegistry().getAggregateFunctionImplementation(
                 new Signature("checksum",
@@ -82,12 +82,11 @@ public class TestChecksumAggregation
                         parseTypeSignature(VARBINARY),
                         parseTypeSignature(BIGINT)));
         Block block = createLongsBlock(null, 1L, 2L, 100L, null, Long.MAX_VALUE, Long.MIN_VALUE);
-        assertAggregation(longAgg, 1.0, expectedChecksum(BigintType.BIGINT, block), block);
+        assertAggregation(longAgg, expectedChecksum(BigintType.BIGINT, block), block);
     }
 
     @Test
     public void testDouble()
-            throws Exception
     {
         InternalAggregationFunction doubleAgg = metadata.getFunctionRegistry().getAggregateFunctionImplementation(
                 new Signature("checksum",
@@ -95,12 +94,11 @@ public class TestChecksumAggregation
                         parseTypeSignature(VARBINARY),
                         parseTypeSignature(DOUBLE)));
         Block block = createDoublesBlock(null, 2.0, null, 3.0, Double.NEGATIVE_INFINITY, Double.POSITIVE_INFINITY, Double.NaN);
-        assertAggregation(doubleAgg, 1.0, expectedChecksum(DoubleType.DOUBLE, block), block);
+        assertAggregation(doubleAgg, expectedChecksum(DoubleType.DOUBLE, block), block);
     }
 
     @Test
     public void testString()
-            throws Exception
     {
         InternalAggregationFunction stringAgg = metadata.getFunctionRegistry().getAggregateFunctionImplementation(
                 new Signature("checksum",
@@ -108,17 +106,34 @@ public class TestChecksumAggregation
                         parseTypeSignature(VARBINARY),
                         parseTypeSignature(VARCHAR)));
         Block block = createStringsBlock("a", "a", null, "b", "c");
-        assertAggregation(stringAgg, 1.0, expectedChecksum(VarcharType.VARCHAR, block), block);
+        assertAggregation(stringAgg, expectedChecksum(VarcharType.VARCHAR, block), block);
+    }
+
+    @Test
+    public void testShortDecimal()
+    {
+        InternalAggregationFunction decimalAgg = metadata.getFunctionRegistry().getAggregateFunctionImplementation(new Signature("checksum", AGGREGATE, parseTypeSignature(VARBINARY), parseTypeSignature("decimal(10,2)")));
+        Block block = createShortDecimalsBlock("11.11", "22.22", null, "33.33", "44.44");
+        DecimalType shortDecimalType = DecimalType.createDecimalType(1);
+        assertAggregation(decimalAgg, expectedChecksum(shortDecimalType, block), block);
+    }
+
+    @Test
+    public void testLongDecimal()
+    {
+        InternalAggregationFunction decimalAgg = metadata.getFunctionRegistry().getAggregateFunctionImplementation(new Signature("checksum", AGGREGATE, parseTypeSignature(VARBINARY), parseTypeSignature("decimal(19,2)")));
+        Block block = createLongDecimalsBlock("11.11", "22.22", null, "33.33", "44.44");
+        DecimalType longDecimalType = DecimalType.createDecimalType(19);
+        assertAggregation(decimalAgg, expectedChecksum(longDecimalType, block), block);
     }
 
     @Test
     public void testArray()
-            throws Exception
     {
         ArrayType arrayType = new ArrayType(BigintType.BIGINT);
         InternalAggregationFunction stringAgg = metadata.getFunctionRegistry().getAggregateFunctionImplementation(new Signature("checksum", AGGREGATE, VarbinaryType.VARBINARY.getTypeSignature(), arrayType.getTypeSignature()));
         Block block = createArrayBigintBlock(asList(null, asList(1L, 2L), asList(3L, 4L), asList(5L, 6L)));
-        assertAggregation(stringAgg, 1.0, expectedChecksum(arrayType, block), block);
+        assertAggregation(stringAgg, expectedChecksum(arrayType, block), block);
     }
 
     private static SqlVarbinary expectedChecksum(Type type, Block block)

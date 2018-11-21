@@ -13,8 +13,16 @@
  */
 package com.facebook.presto.spi;
 
-import java.util.List;
-import java.util.Map;
+import com.facebook.presto.spi.block.BlockEncoding;
+import com.facebook.presto.spi.connector.ConnectorFactory;
+import com.facebook.presto.spi.eventlistener.EventListenerFactory;
+import com.facebook.presto.spi.resourceGroups.ResourceGroupConfigurationManagerFactory;
+import com.facebook.presto.spi.security.PasswordAuthenticatorFactory;
+import com.facebook.presto.spi.security.SystemAccessControlFactory;
+import com.facebook.presto.spi.session.SessionPropertyConfigurationManagerFactory;
+import com.facebook.presto.spi.type.ParametricType;
+import com.facebook.presto.spi.type.Type;
+
 import java.util.Set;
 
 import static java.util.Collections.emptyList;
@@ -22,14 +30,52 @@ import static java.util.Collections.emptySet;
 
 public interface Plugin
 {
-    default void setOptionalConfig(Map<String, String> optionalConfig) {}
+    default Iterable<ConnectorFactory> getConnectorFactories()
+    {
+        return emptyList();
+    }
+
+    default Iterable<BlockEncoding> getBlockEncodings()
+    {
+        return emptyList();
+    }
+
+    default Iterable<Type> getTypes()
+    {
+        return emptyList();
+    }
+
+    default Iterable<ParametricType> getParametricTypes()
+    {
+        return emptyList();
+    }
 
     default Set<Class<?>> getFunctions()
     {
         return emptySet();
     }
 
-    default <T> List<T> getServices(Class<T> type)
+    default Iterable<SystemAccessControlFactory> getSystemAccessControlFactories()
+    {
+        return emptyList();
+    }
+
+    default Iterable<PasswordAuthenticatorFactory> getPasswordAuthenticatorFactories()
+    {
+        return emptyList();
+    }
+
+    default Iterable<EventListenerFactory> getEventListenerFactories()
+    {
+        return emptyList();
+    }
+
+    default Iterable<ResourceGroupConfigurationManagerFactory> getResourceGroupConfigurationManagerFactories()
+    {
+        return emptyList();
+    }
+
+    default Iterable<SessionPropertyConfigurationManagerFactory> getSessionPropertyConfigurationManagerFactories()
     {
         return emptyList();
     }

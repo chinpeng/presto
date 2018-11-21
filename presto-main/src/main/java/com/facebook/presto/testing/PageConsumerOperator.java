@@ -13,6 +13,7 @@
  */
 package com.facebook.presto.testing;
 
+import com.facebook.presto.execution.buffer.PagesSerdeFactory;
 import com.facebook.presto.operator.DriverContext;
 import com.facebook.presto.operator.Operator;
 import com.facebook.presto.operator.OperatorContext;
@@ -21,7 +22,6 @@ import com.facebook.presto.operator.OutputFactory;
 import com.facebook.presto.spi.Page;
 import com.facebook.presto.spi.type.Type;
 import com.facebook.presto.sql.planner.plan.PlanNodeId;
-import com.google.common.collect.ImmutableList;
 
 import java.util.List;
 import java.util.function.Consumer;
@@ -44,7 +44,7 @@ public class PageConsumerOperator
         }
 
         @Override
-        public OperatorFactory createOutputOperator(int operatorId, PlanNodeId planNodeId, List<Type> types, Function<Page, Page> pagePreprocessor)
+        public OperatorFactory createOutputOperator(int operatorId, PlanNodeId planNodeId, List<Type> types, Function<Page, Page> pagePreprocessor, PagesSerdeFactory serdeFactory)
         {
             return new PageConsumerOperatorFactory(operatorId, planNodeId, pageConsumerFactory.apply(types), pagePreprocessor);
         }
@@ -68,13 +68,7 @@ public class PageConsumerOperator
         }
 
         @Override
-        public List<Type> getTypes()
-        {
-            return ImmutableList.of();
-        }
-
-        @Override
-        public PageConsumerOperator createOperator(DriverContext driverContext)
+        public Operator createOperator(DriverContext driverContext)
         {
             checkState(!closed, "Factory is already closed");
             OperatorContext operatorContext = driverContext.addOperatorContext(operatorId, planNodeId, PageConsumerOperator.class.getSimpleName());
@@ -82,7 +76,7 @@ public class PageConsumerOperator
         }
 
         @Override
-        public void close()
+        public void noMoreOperators()
         {
             closed = true;
         }
@@ -116,12 +110,6 @@ public class PageConsumerOperator
     public OperatorContext getOperatorContext()
     {
         return operatorContext;
-    }
-
-    @Override
-    public List<Type> getTypes()
-    {
-        return ImmutableList.of();
     }
 
     @Override

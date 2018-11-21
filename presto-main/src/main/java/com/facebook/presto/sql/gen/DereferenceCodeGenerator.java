@@ -13,23 +13,23 @@
  */
 package com.facebook.presto.sql.gen;
 
-import com.facebook.presto.bytecode.BytecodeBlock;
-import com.facebook.presto.bytecode.BytecodeNode;
-import com.facebook.presto.bytecode.Variable;
-import com.facebook.presto.bytecode.control.IfStatement;
-import com.facebook.presto.bytecode.expression.BytecodeExpression;
-import com.facebook.presto.bytecode.instruction.LabelNode;
 import com.facebook.presto.metadata.Signature;
 import com.facebook.presto.spi.block.Block;
 import com.facebook.presto.spi.type.Type;
 import com.facebook.presto.sql.relational.ConstantExpression;
 import com.facebook.presto.sql.relational.RowExpression;
+import io.airlift.bytecode.BytecodeBlock;
+import io.airlift.bytecode.BytecodeNode;
+import io.airlift.bytecode.Variable;
+import io.airlift.bytecode.control.IfStatement;
+import io.airlift.bytecode.expression.BytecodeExpression;
+import io.airlift.bytecode.instruction.LabelNode;
 
 import java.util.List;
 
-import static com.facebook.presto.bytecode.expression.BytecodeExpressions.constantInt;
 import static com.facebook.presto.sql.gen.SqlTypeBytecodeExpression.constantType;
 import static com.google.common.base.Preconditions.checkArgument;
+import static io.airlift.bytecode.expression.BytecodeExpressions.constantInt;
 
 public class DereferenceCodeGenerator
         implements BytecodeGenerator
@@ -45,6 +45,8 @@ public class DereferenceCodeGenerator
         Variable rowBlock = generator.getScope().createTempVariable(Block.class);
         int index = (int) ((ConstantExpression) arguments.get(1)).getValue();
 
+        // clear the wasNull flag before evaluating the row value
+        block.putVariable(wasNull, false);
         block.append(generator.generate(arguments.get(0))).putVariable(rowBlock);
 
         IfStatement ifRowBlockIsNull = new IfStatement("if row block is null...")
@@ -76,7 +78,8 @@ public class DereferenceCodeGenerator
 
         ifFieldIsNull.ifFalse()
                 .comment("otherwise call type.getTYPE(rowBlock, index)")
-                .append(value);
+                .append(value)
+                .putVariable(wasNull, false);
 
         block.append(ifFieldIsNull)
                 .visitLabel(end);

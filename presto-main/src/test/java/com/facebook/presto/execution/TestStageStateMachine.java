@@ -13,7 +13,9 @@
  */
 package com.facebook.presto.execution;
 
-import com.facebook.presto.spi.type.Type;
+import com.facebook.presto.cost.StatsAndCosts;
+import com.facebook.presto.execution.scheduler.SplitSchedulerStats;
+import com.facebook.presto.operator.StageExecutionStrategy;
 import com.facebook.presto.sql.planner.Partitioning;
 import com.facebook.presto.sql.planner.PartitioningScheme;
 import com.facebook.presto.sql.planner.PlanFragment;
@@ -45,14 +47,14 @@ import static org.testng.Assert.assertTrue;
 
 public class TestStageStateMachine
 {
-    private static final StageId STAGE_ID = new StageId("query", "stage");
+    private static final StageId STAGE_ID = new StageId("query", 0);
     private static final URI LOCATION = URI.create("fake://fake-stage");
     private static final PlanFragment PLAN_FRAGMENT = createValuesPlan();
     private static final SQLException FAILED_CAUSE = new SQLException("FAILED");
 
     private final ExecutorService executor = newCachedThreadPool();
 
-    @AfterClass
+    @AfterClass(alwaysRun = true)
     public void tearDown()
     {
         executor.shutdownNow();
@@ -313,7 +315,7 @@ public class TestStageStateMachine
 
     private StageStateMachine createStageStateMachine()
     {
-        return new StageStateMachine(STAGE_ID, LOCATION, TEST_SESSION, PLAN_FRAGMENT, executor);
+        return new StageStateMachine(STAGE_ID, LOCATION, TEST_SESSION, PLAN_FRAGMENT, executor, new SplitSchedulerStats());
     }
 
     private static PlanFragment createValuesPlan()
@@ -325,10 +327,12 @@ public class TestStageStateMachine
                 new ValuesNode(valuesNodeId,
                         ImmutableList.of(symbol),
                         ImmutableList.of(ImmutableList.of(new StringLiteral("foo")))),
-                ImmutableMap.<Symbol, Type>of(symbol, VARCHAR),
+                ImmutableMap.of(symbol, VARCHAR),
                 SOURCE_DISTRIBUTION,
                 ImmutableList.of(valuesNodeId),
-                new PartitioningScheme(Partitioning.create(SINGLE_DISTRIBUTION, ImmutableList.of()), ImmutableList.of(symbol)));
+                new PartitioningScheme(Partitioning.create(SINGLE_DISTRIBUTION, ImmutableList.of()), ImmutableList.of(symbol)),
+                StageExecutionStrategy.ungroupedExecution(),
+                StatsAndCosts.empty());
 
         return planFragment;
     }

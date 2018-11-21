@@ -18,10 +18,12 @@ import com.facebook.presto.spi.PrestoException;
 import com.facebook.presto.spi.block.Block;
 import com.facebook.presto.spi.block.BlockBuilder;
 import com.facebook.presto.spi.block.BlockBuilderStatus;
+import com.facebook.presto.spi.block.PageBuilderStatus;
 import com.facebook.presto.spi.block.ShortArrayBlockBuilder;
 
 import static com.facebook.presto.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
 import static com.facebook.presto.spi.type.TypeSignature.parseTypeSignature;
+import static java.lang.Long.rotateLeft;
 
 public final class SmallintType
         extends AbstractType
@@ -43,9 +45,16 @@ public final class SmallintType
     @Override
     public BlockBuilder createBlockBuilder(BlockBuilderStatus blockBuilderStatus, int expectedEntries, int expectedBytesPerEntry)
     {
+        int maxBlockSizeInBytes;
+        if (blockBuilderStatus == null) {
+            maxBlockSizeInBytes = PageBuilderStatus.DEFAULT_MAX_PAGE_SIZE_IN_BYTES;
+        }
+        else {
+            maxBlockSizeInBytes = blockBuilderStatus.getMaxPageSizeInBytes();
+        }
         return new ShortArrayBlockBuilder(
                 blockBuilderStatus,
-                Math.min(expectedEntries, blockBuilderStatus.getMaxBlockSizeInBytes() / Short.BYTES));
+                Math.min(expectedEntries, maxBlockSizeInBytes / Short.BYTES));
     }
 
     @Override
@@ -57,7 +66,7 @@ public final class SmallintType
     @Override
     public BlockBuilder createFixedSizeBlockBuilder(int positionCount)
     {
-        return new ShortArrayBlockBuilder(new BlockBuilderStatus(), positionCount);
+        return new ShortArrayBlockBuilder(null, positionCount);
     }
 
     @Override
@@ -93,7 +102,7 @@ public final class SmallintType
     @Override
     public long hash(Block block, int position)
     {
-        return block.getShort(position, 0);
+        return hash(block.getShort(position, 0));
     }
 
     @Override
@@ -147,5 +156,11 @@ public final class SmallintType
     public int hashCode()
     {
         return getClass().hashCode();
+    }
+
+    public static long hash(short value)
+    {
+        // xxhash64 mix
+        return rotateLeft(value * 0xC2B2AE3D27D4EB4FL, 31) * 0x9E3779B185EBCA87L;
     }
 }

@@ -14,13 +14,17 @@
 package com.facebook.presto.sql.planner;
 
 import com.facebook.presto.Session;
+import com.facebook.presto.connector.ConnectorId;
 import com.facebook.presto.execution.scheduler.NodeScheduler;
+import com.facebook.presto.operator.BucketPartitionFunction;
 import com.facebook.presto.operator.PartitionFunction;
 import com.facebook.presto.spi.BucketFunction;
 import com.facebook.presto.spi.ConnectorSplit;
 import com.facebook.presto.spi.Node;
 import com.facebook.presto.spi.connector.ConnectorNodePartitioningProvider;
+import com.facebook.presto.spi.connector.ConnectorPartitionHandle;
 import com.facebook.presto.spi.type.Type;
+import com.facebook.presto.split.EmptySplit;
 import com.google.common.collect.BiMap;
 import com.google.common.collect.HashBiMap;
 
@@ -40,7 +44,7 @@ import static java.util.Objects.requireNonNull;
 public class NodePartitioningManager
 {
     private final NodeScheduler nodeScheduler;
-    private final ConcurrentMap<String, ConnectorNodePartitioningProvider> partitioningProviders = new ConcurrentHashMap<>();
+    private final ConcurrentMap<ConnectorId, ConnectorNodePartitioningProvider> partitioningProviders = new ConcurrentHashMap<>();
 
     @Inject
     public NodePartitioningManager(NodeScheduler nodeScheduler)
@@ -48,9 +52,17 @@ public class NodePartitioningManager
         this.nodeScheduler = requireNonNull(nodeScheduler, "nodeScheduler is null");
     }
 
-    public void addPartitioningProvider(String connectorId, ConnectorNodePartitioningProvider partitioningProvider)
+    public void addPartitioningProvider(ConnectorId connectorId, ConnectorNodePartitioningProvider nodePartitioningProvider)
     {
-        checkArgument(partitioningProviders.putIfAbsent(connectorId, partitioningProvider) == null, "NodePartitioningProvider for connector '%s' is already registered", connectorId);
+        requireNonNull(connectorId, "connectorId is null");
+        requireNonNull(nodePartitioningProvider, "nodePartitioningProvider is null");
+        checkArgument(partitioningProviders.putIfAbsent(connectorId, nodePartitioningProvider) == null,
+                "NodePartitioningProvider for connector '%s' is already registered", connectorId);
+    }
+
+    public void removePartitioningProvider(ConnectorId connectorId)
+    {
+        partitioningProviders.remove(connectorId);
     }
 
     public PartitionFunction getPartitionFunction(
@@ -84,7 +96,18 @@ public class NodePartitioningManager
 
             checkArgument(bucketFunction != null, "No function %s", partitioningHandle);
         }
-        return new PartitionFunction(bucketFunction, partitioningScheme.getBucketToPartition().get());
+        return new BucketPartitionFunction(bucketFunction, partitioningScheme.getBucketToPartition().get());
+    }
+
+    public List<ConnectorPartitionHandle> listPartitionHandles(
+            Session session,
+            PartitioningHandle partitioningHandle)
+    {
+        ConnectorNodePartitioningProvider partitioningProvider = partitioningProviders.get(partitioningHandle.getConnectorId().get());
+        return partitioningProvider.listPartitionHandles(
+                partitioningHandle.getTransactionHandle().orElse(null),
+                session.toConnectorSession(),
+                partitioningHandle.getConnectorHandle());
     }
 
     public NodePartitionMap getNodePartitioningMap(Session session, PartitioningHandle partitioningHandle)
@@ -132,6 +155,18 @@ public class NodePartitioningManager
                 partitioningHandle.getConnectorHandle());
         checkArgument(splitBucketFunction != null, "No partitioning %s", partitioningHandle);
 
-        return new NodePartitionMap(nodeToPartition.inverse(), bucketToPartition, split -> splitBucketFunction.applyAsInt(split.getConnectorSplit()));
+        return new NodePartitionMap(nodeToPartition.inverse(), bucketToPartition, split -> {
+            int bucket;
+            if (split.getConnectorSplit() instanceof EmptySplit) {
+                bucket = split.getLifespan().isTaskWide() ? 0 : split.getLifespan().getId();
+            }
+            else {
+                bucket = splitBucketFunction.applyAsInt(split.getConnectorSplit());
+            }
+            if (!split.getLifespan().isTaskWide()) {
+                checkArgument(split.getLifespan().getId() == bucket);
+            }
+            return bucket;
+        });
     }
 }

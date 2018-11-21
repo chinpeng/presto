@@ -20,9 +20,14 @@ import com.google.common.collect.ImmutableMap;
 
 import javax.annotation.concurrent.Immutable;
 
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
+import java.util.function.Consumer;
+import java.util.stream.Stream;
 
 import static com.google.common.base.MoreObjects.toStringHelper;
 import static java.util.Objects.requireNonNull;
@@ -102,6 +107,13 @@ public class Table
         return partitionColumns;
     }
 
+    public Optional<Column> getColumn(String name)
+    {
+        return Stream.concat(partitionColumns.stream(), dataColumns.stream())
+                .filter(column -> column.getName().equals(name))
+                .findFirst();
+    }
+
     @JsonProperty
     public Storage getStorage()
     {
@@ -126,15 +138,6 @@ public class Table
         return viewExpandedText;
     }
 
-    @Override
-    public String toString()
-    {
-        return toStringHelper(this)
-                .add("databaseName", databaseName)
-                .add("tableName", tableName)
-                .toString();
-    }
-
     public static Builder builder()
     {
         return new Builder();
@@ -145,6 +148,62 @@ public class Table
         return new Builder(table);
     }
 
+    @Override
+    public String toString()
+    {
+        return toStringHelper(this)
+                .add("databaseName", databaseName)
+                .add("tableName", tableName)
+                .add("owner", owner)
+                .add("tableType", tableType)
+                .add("dataColumns", dataColumns)
+                .add("partitionColumns", partitionColumns)
+                .add("storage", storage)
+                .add("parameters", parameters)
+                .add("viewOriginalText", viewOriginalText)
+                .add("viewExpandedText", viewExpandedText)
+                .toString();
+    }
+
+    @Override
+    public boolean equals(Object o)
+    {
+        if (this == o) {
+            return true;
+        }
+        if (o == null || getClass() != o.getClass()) {
+            return false;
+        }
+
+        Table table = (Table) o;
+        return Objects.equals(databaseName, table.databaseName) &&
+                Objects.equals(tableName, table.tableName) &&
+                Objects.equals(owner, table.owner) &&
+                Objects.equals(tableType, table.tableType) &&
+                Objects.equals(dataColumns, table.dataColumns) &&
+                Objects.equals(partitionColumns, table.partitionColumns) &&
+                Objects.equals(storage, table.storage) &&
+                Objects.equals(parameters, table.parameters) &&
+                Objects.equals(viewOriginalText, table.viewOriginalText) &&
+                Objects.equals(viewExpandedText, table.viewExpandedText);
+    }
+
+    @Override
+    public int hashCode()
+    {
+        return Objects.hash(
+                databaseName,
+                tableName,
+                owner,
+                tableType,
+                dataColumns,
+                partitionColumns,
+                storage,
+                parameters,
+                viewOriginalText,
+                viewExpandedText);
+    }
+
     public static class Builder
     {
         private final Storage.Builder storageBuilder;
@@ -152,9 +211,9 @@ public class Table
         private String tableName;
         private String owner;
         private String tableType;
-        private List<Column> dataColumns;
-        private List<Column> partitionColumns;
-        private Map<String, String> parameters;
+        private List<Column> dataColumns = new ArrayList<>();
+        private List<Column> partitionColumns = new ArrayList<>();
+        private Map<String, String> parameters = new LinkedHashMap<>();
         private Optional<String> viewOriginalText = Optional.empty();
         private Optional<String> viewExpandedText = Optional.empty();
 
@@ -170,9 +229,9 @@ public class Table
             owner = table.owner;
             tableType = table.tableType;
             storageBuilder = Storage.builder(table.getStorage());
-            dataColumns = table.dataColumns;
-            partitionColumns = table.partitionColumns;
-            parameters = table.parameters;
+            dataColumns = new ArrayList<>(table.dataColumns);
+            partitionColumns = new ArrayList<>(table.partitionColumns);
+            parameters = new LinkedHashMap<>(table.parameters);
             viewOriginalText = table.viewOriginalText;
             viewExpandedText = table.viewExpandedText;
         }
@@ -208,19 +267,25 @@ public class Table
 
         public Builder setDataColumns(List<Column> dataColumns)
         {
-            this.dataColumns = dataColumns;
+            this.dataColumns = new ArrayList<>(dataColumns);
+            return this;
+        }
+
+        public Builder addDataColumn(Column dataColumn)
+        {
+            this.dataColumns.add(dataColumn);
             return this;
         }
 
         public Builder setPartitionColumns(List<Column> partitionColumns)
         {
-            this.partitionColumns = partitionColumns;
+            this.partitionColumns = new ArrayList<>(partitionColumns);
             return this;
         }
 
         public Builder setParameters(Map<String, String> parameters)
         {
-            this.parameters = parameters;
+            this.parameters = new LinkedHashMap<>(parameters);
             return this;
         }
 
@@ -233,6 +298,12 @@ public class Table
         public Builder setViewExpandedText(Optional<String> viewExpandedText)
         {
             this.viewExpandedText = viewExpandedText;
+            return this;
+        }
+
+        public Builder withStorage(Consumer<Storage.Builder> consumer)
+        {
+            consumer.accept(storageBuilder);
             return this;
         }
 

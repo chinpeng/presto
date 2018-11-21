@@ -11,12 +11,14 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 package com.facebook.presto.operator;
 
-import com.facebook.presto.spi.block.Block;
+import com.facebook.presto.spi.Page;
 
+import javax.annotation.concurrent.NotThreadSafe;
+
+@NotThreadSafe
 public interface JoinFilterFunction
 {
-    boolean filter(int leftPosition, Block[] leftBlocks, int rightPosition, Block[] rightBlocks);
+    boolean filter(int leftPosition, int rightPosition, Page rightPage);
 }

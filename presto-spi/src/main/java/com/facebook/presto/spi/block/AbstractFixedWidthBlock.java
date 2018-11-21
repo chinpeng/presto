@@ -17,6 +17,8 @@ import io.airlift.slice.Slice;
 import io.airlift.slice.Slices;
 import io.airlift.slice.XxHash64;
 
+import static com.facebook.presto.spi.block.BlockUtil.checkValidRegion;
+
 public abstract class AbstractFixedWidthBlock
         implements Block
 {
@@ -40,7 +42,7 @@ public abstract class AbstractFixedWidthBlock
     }
 
     @Override
-    public int getLength(int position)
+    public int getSliceLength(int position)
     {
         return fixedSize;
     }
@@ -138,13 +140,14 @@ public abstract class AbstractFixedWidthBlock
     @Override
     public void writePositionTo(int position, BlockBuilder blockBuilder)
     {
-        writeBytesTo(position, 0, getLength(position), blockBuilder);
+        writeBytesTo(position, 0, getSliceLength(position), blockBuilder);
+        blockBuilder.closeEntry();
     }
 
     @Override
-    public BlockEncoding getEncoding()
+    public String getEncodingName()
     {
-        return new FixedWidthBlockEncoding(fixedSize);
+        return FixedWidthBlockEncoding.NAME;
     }
 
     @Override
@@ -154,7 +157,18 @@ public abstract class AbstractFixedWidthBlock
 
         Slice copy = Slices.copyOf(getRawSlice(), valueOffset(position), fixedSize);
 
-        return new FixedWidthBlock(fixedSize, 1, copy, Slices.wrappedBooleanArray(isNull(position)));
+        Slice valueIsNull = null;
+        if (isNull(position)) {
+            valueIsNull = Slices.wrappedBooleanArray(true);
+        }
+
+        return new FixedWidthBlock(fixedSize, 1, copy, valueIsNull);
+    }
+
+    @Override
+    public long getEstimatedDataSizeForStats(int position)
+    {
+        return isNull(position) ? 0 : fixedSize;
     }
 
     @Override
@@ -162,6 +176,14 @@ public abstract class AbstractFixedWidthBlock
     {
         checkReadablePosition(position);
         return isEntryNull(position);
+    }
+
+    @Override
+    public long getRegionSizeInBytes(int positionOffset, int length)
+    {
+        int positionCount = getPositionCount();
+        checkValidRegion(positionCount, positionOffset, length);
+        return (fixedSize + Byte.BYTES) * (long) length;
     }
 
     private int valueOffset(int position)

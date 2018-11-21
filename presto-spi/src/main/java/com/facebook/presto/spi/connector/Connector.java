@@ -61,14 +61,6 @@ public interface Connector
     }
 
     /**
-     * @throws UnsupportedOperationException if this connector does not support writing tables record at a time
-     */
-    default ConnectorRecordSinkProvider getRecordSinkProvider()
-    {
-        throw new UnsupportedOperationException();
-    }
-
-    /**
      * @throws UnsupportedOperationException if this connector does not support indexes
      */
     default ConnectorIndexProvider getIndexProvider()
@@ -109,9 +101,25 @@ public interface Connector
     }
 
     /**
+     * @return the schema properties for this connector
+     */
+    default List<PropertyMetadata<?>> getSchemaProperties()
+    {
+        return emptyList();
+    }
+
+    /**
      * @return the table properties for this connector
      */
     default List<PropertyMetadata<?>> getTableProperties()
+    {
+        return emptyList();
+    }
+
+    /**
+     * @return the column properties for this connector
+     */
+    default List<PropertyMetadata<?>> getColumnProperties()
     {
         return emptyList();
     }

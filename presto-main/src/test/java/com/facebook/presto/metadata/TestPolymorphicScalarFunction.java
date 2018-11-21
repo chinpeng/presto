@@ -22,7 +22,6 @@ import com.facebook.presto.type.TypeRegistry;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
-import com.google.common.primitives.Ints;
 import io.airlift.slice.Slice;
 import io.airlift.slice.Slices;
 import org.testng.annotations.Test;
@@ -34,12 +33,13 @@ import static com.facebook.presto.metadata.TestPolymorphicScalarFunction.TestMet
 import static com.facebook.presto.spi.function.OperatorType.ADD;
 import static com.facebook.presto.spi.type.StandardTypes.VARCHAR;
 import static com.facebook.presto.spi.type.TypeSignature.parseTypeSignature;
+import static java.lang.Math.toIntExact;
 import static org.testng.Assert.assertEquals;
 
 public class TestPolymorphicScalarFunction
 {
     private static final TypeRegistry TYPE_REGISTRY = new TypeRegistry();
-    private static final FunctionRegistry REGISTRY = new FunctionRegistry(TYPE_REGISTRY, new BlockEncodingManager(TYPE_REGISTRY), new FeaturesConfig().setExperimentalSyntaxEnabled(true));
+    private static final FunctionRegistry REGISTRY = new FunctionRegistry(TYPE_REGISTRY, new BlockEncodingManager(TYPE_REGISTRY), new FeaturesConfig());
     private static final Signature SIGNATURE = Signature.builder()
             .name("foo")
             .kind(SCALAR)
@@ -49,11 +49,10 @@ public class TestPolymorphicScalarFunction
     private static final long INPUT_VARCHAR_LENGTH = 10;
     private static final String INPUT_VARCHAR_SIGNATURE = "varchar(" + INPUT_VARCHAR_LENGTH + ")";
     private static final TypeSignature INPUT_VARCHAR_TYPE = parseTypeSignature(INPUT_VARCHAR_SIGNATURE);
-    private static final Slice INPUT_SLICE = Slices.allocate(Ints.checkedCast(INPUT_VARCHAR_LENGTH));
+    private static final Slice INPUT_SLICE = Slices.allocate(toIntExact(INPUT_VARCHAR_LENGTH));
     private static final BoundVariables BOUND_VARIABLES = new BoundVariables(
             ImmutableMap.of("V", TYPE_REGISTRY.getType(INPUT_VARCHAR_TYPE)),
-            ImmutableMap.of("x", INPUT_VARCHAR_LENGTH)
-    );
+            ImmutableMap.of("x", INPUT_VARCHAR_LENGTH));
 
     @Test
     public void testSelectsMethodBasedOnArgumentTypes()
@@ -61,11 +60,11 @@ public class TestPolymorphicScalarFunction
     {
         SqlScalarFunction function = SqlScalarFunction.builder(TestMethods.class)
                 .signature(SIGNATURE)
+                .deterministic(true)
                 .implementation(b -> b.methods("bigintToBigintReturnExtraParameter"))
                 .implementation(b -> b
                         .methods("varcharToBigintReturnExtraParameter")
-                        .withExtraParameters(context -> ImmutableList.of(context.getLiteral("x")))
-                )
+                        .withExtraParameters(context -> ImmutableList.of(context.getLiteral("x"))))
                 .build();
 
         ScalarFunctionImplementation functionImplementation = function.specialize(BOUND_VARIABLES, 1, TYPE_REGISTRY, REGISTRY);
@@ -78,47 +77,11 @@ public class TestPolymorphicScalarFunction
     {
         SqlScalarFunction function = SqlScalarFunction.builder(TestMethods.class)
                 .signature(SIGNATURE)
+                .deterministic(true)
                 .implementation(b -> b.methods("varcharToVarcharCreateSliceWithExtraParameterLength"))
                 .implementation(b -> b
                         .methods("varcharToBigintReturnExtraParameter")
-                        .withExtraParameters(context -> ImmutableList.of(42))
-                )
-                .build();
-
-        ScalarFunctionImplementation functionImplementation = function.specialize(BOUND_VARIABLES, 1, TYPE_REGISTRY, REGISTRY);
-
-        assertEquals(functionImplementation.getMethodHandle().invoke(INPUT_SLICE), VARCHAR_TO_BIGINT_RETURN_VALUE);
-    }
-
-    @Test
-    public void testSelectsFirstMethodBasedOnPredicate()
-            throws Throwable
-    {
-        SqlScalarFunction function = SqlScalarFunction.builder(TestMethods.class)
-                .signature(SIGNATURE)
-                .implementation(b -> b
-                        .methods("varcharToBigint")
-                        .withPredicate(context -> true)
-                )
-                .implementation(b -> b.methods("varcharToBigintReturnExtraParameter"))
-                .build();
-
-        ScalarFunctionImplementation functionImplementation = function.specialize(BOUND_VARIABLES, 1, TYPE_REGISTRY, REGISTRY);
-
-        assertEquals(functionImplementation.getMethodHandle().invoke(INPUT_SLICE), VARCHAR_TO_BIGINT_RETURN_VALUE);
-    }
-
-    @Test
-    public void testSelectsSecondMethodBasedOnPredicate()
-            throws Throwable
-    {
-        SqlScalarFunction function = SqlScalarFunction.builder(TestMethods.class)
-                .signature(SIGNATURE)
-                .implementation(b -> b
-                        .methods("varcharToBigintReturnExtraParameter")
-                        .withPredicate(context -> false)
-                )
-                .implementation(b -> b.methods("varcharToBigint"))
+                        .withExtraParameters(context -> ImmutableList.of(42)))
                 .build();
 
         ScalarFunctionImplementation functionImplementation = function.specialize(BOUND_VARIABLES, 1, TYPE_REGISTRY, REGISTRY);
@@ -139,6 +102,7 @@ public class TestPolymorphicScalarFunction
 
         SqlScalarFunction function = SqlScalarFunction.builder(TestMethods.class)
                 .signature(signature)
+                .deterministic(true)
                 .implementation(b -> b.methods("varcharToVarchar"))
                 .build();
 
@@ -161,6 +125,7 @@ public class TestPolymorphicScalarFunction
 
         SqlScalarFunction function = SqlScalarFunction.builder(TestMethods.class)
                 .signature(signature)
+                .deterministic(true)
                 .implementation(b -> b.methods("varcharToVarchar"))
                 .build();
 
@@ -181,6 +146,7 @@ public class TestPolymorphicScalarFunction
 
         SqlScalarFunction function = SqlScalarFunction.builder(TestMethods.class)
                 .signature(signature)
+                .deterministic(true)
                 .implementation(b -> b.methods("varcharToVarchar"))
                 .build();
 
@@ -193,6 +159,7 @@ public class TestPolymorphicScalarFunction
     {
         SqlScalarFunction.builder(TestMethods.class)
                 .signature(SIGNATURE)
+                .deterministic(true)
                 .implementation(b -> b.methods("bigintToBigintReturnExtraParameter"))
                 .implementation(b -> b.methods("foo"))
                 .build();
@@ -204,9 +171,9 @@ public class TestPolymorphicScalarFunction
     {
         SqlScalarFunction.builder(TestMethods.class)
                 .signature(SIGNATURE)
+                .deterministic(true)
                 .implementation(b -> b
-                        .withExtraParameters(context -> ImmutableList.of(42))
-                )
+                        .withExtraParameters(context -> ImmutableList.of(42)))
                 .build();
     }
 
@@ -216,27 +183,9 @@ public class TestPolymorphicScalarFunction
     {
         SqlScalarFunction function = SqlScalarFunction.builder(TestMethods.class)
                 .signature(SIGNATURE)
+                .deterministic(true)
                 .implementation(b -> b.methods("varcharToBigintReturnFirstExtraParameter"))
                 .implementation(b -> b.methods("varcharToBigintReturnExtraParameter"))
-                .build();
-
-        function.specialize(BOUND_VARIABLES, 1, TYPE_REGISTRY, REGISTRY);
-    }
-
-    @Test(expectedExceptions = {IllegalStateException.class},
-            expectedExceptionsMessageRegExp = "two matching methods \\(varcharToBigintReturnFirstExtraParameter and varcharToBigintReturnExtraParameter\\) for parameter types \\[varchar\\(10\\)\\]")
-    public void testFailIfTwoMethodsWithPredicatesWithSameArguments()
-    {
-        SqlScalarFunction function = SqlScalarFunction.builder(TestMethods.class)
-                .signature(SIGNATURE)
-                .implementation(b -> b
-                        .methods("varcharToBigintReturnFirstExtraParameter")
-                        .withPredicate(context -> true)
-                )
-                .implementation(b -> b
-                        .methods("varcharToBigintReturnExtraParameter")
-                        .withPredicate(context -> true)
-                )
                 .build();
 
         function.specialize(BOUND_VARIABLES, 1, TYPE_REGISTRY, REGISTRY);

@@ -18,8 +18,7 @@ import com.facebook.presto.execution.StateMachine.StateChangeListener;
 import com.facebook.presto.metadata.Split;
 import com.facebook.presto.sql.planner.plan.PlanNodeId;
 import com.google.common.collect.Multimap;
-
-import java.util.concurrent.CompletableFuture;
+import com.google.common.util.concurrent.ListenableFuture;
 
 public interface RemoteTask
 {
@@ -37,11 +36,15 @@ public interface RemoteTask
 
     void noMoreSplits(PlanNodeId sourceId);
 
+    void noMoreSplits(PlanNodeId sourceId, Lifespan lifespan);
+
     void setOutputBuffers(OutputBuffers outputBuffers);
 
     void addStateChangeListener(StateChangeListener<TaskStatus> stateChangeListener);
 
-    CompletableFuture<TaskStatus> getStateChange(TaskStatus taskStatus);
+    void addFinalTaskInfoListener(StateChangeListener<TaskInfo> stateChangeListener);
+
+    ListenableFuture<?> whenSplitQueueHasSpace(int threshold);
 
     void cancel();
 

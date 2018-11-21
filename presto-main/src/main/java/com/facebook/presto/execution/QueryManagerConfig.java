@@ -14,53 +14,54 @@
 package com.facebook.presto.execution;
 
 import io.airlift.configuration.Config;
+import io.airlift.configuration.ConfigDescription;
 import io.airlift.configuration.DefunctConfig;
 import io.airlift.configuration.LegacyConfig;
 import io.airlift.units.Duration;
 import io.airlift.units.MinDuration;
 
+import javax.validation.constraints.Max;
 import javax.validation.constraints.Min;
 import javax.validation.constraints.NotNull;
 
 import java.util.concurrent.TimeUnit;
 
-@DefunctConfig({"query.max-pending-splits-per-node",
-                "experimental.big-query-initial-hash-partitions",
-                "experimental.max-concurrent-big-queries",
-                "experimental.max-queued-big-queries",
-                "query.remote-task.max-consecutive-error-count"})
+@DefunctConfig({
+        "query.max-pending-splits-per-node",
+        "query.queue-config-file",
+        "experimental.big-query-initial-hash-partitions",
+        "experimental.max-concurrent-big-queries",
+        "experimental.max-queued-big-queries",
+        "query.remote-task.max-consecutive-error-count"})
 public class QueryManagerConfig
 {
     private int scheduleSplitBatchSize = 1000;
+    private int minScheduleSplitBatchSize = 100;
     private int maxConcurrentQueries = 1000;
     private int maxQueuedQueries = 5000;
-    private String queueConfigFile;
 
     private int initialHashPartitions = 100;
     private Duration minQueryExpireAge = new Duration(15, TimeUnit.MINUTES);
     private int maxQueryHistory = 100;
+    private int maxQueryLength = 1_000_000;
+    private int maxStageCount = 100;
     private Duration clientTimeout = new Duration(5, TimeUnit.MINUTES);
 
     private int queryManagerExecutorPoolSize = 5;
 
-    private Duration remoteTaskMinErrorDuration = new Duration(2, TimeUnit.MINUTES);
+    private Duration remoteTaskMaxErrorDuration = new Duration(5, TimeUnit.MINUTES);
     private int remoteTaskMaxCallbackThreads = 1000;
 
     private String queryExecutionPolicy = "all-at-once";
     private Duration queryMaxRunTime = new Duration(100, TimeUnit.DAYS);
+    private Duration queryMaxExecutionTime = new Duration(100, TimeUnit.DAYS);
     private Duration queryMaxCpuTime = new Duration(1_000_000_000, TimeUnit.DAYS);
 
-    public String getQueueConfigFile()
-    {
-        return queueConfigFile;
-    }
+    private int initializationRequiredWorkers = 1;
+    private Duration initializationTimeout = new Duration(5, TimeUnit.MINUTES);
 
-    @Config("query.queue-config-file")
-    public QueryManagerConfig setQueueConfigFile(String queueConfigFile)
-    {
-        this.queueConfigFile = queueConfigFile;
-        return this;
-    }
+    private int requiredWorkers = 1;
+    private Duration requiredWorkersMaxWait = new Duration(5, TimeUnit.MINUTES);
 
     @Min(1)
     public int getScheduleSplitBatchSize()
@@ -72,6 +73,19 @@ public class QueryManagerConfig
     public QueryManagerConfig setScheduleSplitBatchSize(int scheduleSplitBatchSize)
     {
         this.scheduleSplitBatchSize = scheduleSplitBatchSize;
+        return this;
+    }
+
+    @Min(1)
+    public int getMinScheduleSplitBatchSize()
+    {
+        return minScheduleSplitBatchSize;
+    }
+
+    @Config("query.min-schedule-split-batch-size")
+    public QueryManagerConfig setMinScheduleSplitBatchSize(int minScheduleSplitBatchSize)
+    {
+        this.minScheduleSplitBatchSize = minScheduleSplitBatchSize;
         return this;
     }
 
@@ -145,6 +159,33 @@ public class QueryManagerConfig
         return this;
     }
 
+    @Min(0)
+    @Max(1_000_000_000)
+    public int getMaxQueryLength()
+    {
+        return maxQueryLength;
+    }
+
+    @Config("query.max-length")
+    public QueryManagerConfig setMaxQueryLength(int maxQueryLength)
+    {
+        this.maxQueryLength = maxQueryLength;
+        return this;
+    }
+
+    @Min(1)
+    public int getMaxStageCount()
+    {
+        return maxStageCount;
+    }
+
+    @Config("query.max-stage-count")
+    public QueryManagerConfig setMaxStageCount(int maxStageCount)
+    {
+        this.maxStageCount = maxStageCount;
+        return this;
+    }
+
     @MinDuration("5s")
     @NotNull
     public Duration getClientTimeout()
@@ -172,17 +213,30 @@ public class QueryManagerConfig
         return this;
     }
 
-    @NotNull
-    @MinDuration("1s")
+    @Deprecated
     public Duration getRemoteTaskMinErrorDuration()
     {
-        return remoteTaskMinErrorDuration;
+        return remoteTaskMaxErrorDuration;
     }
 
+    @Deprecated
     @Config("query.remote-task.min-error-duration")
     public QueryManagerConfig setRemoteTaskMinErrorDuration(Duration remoteTaskMinErrorDuration)
     {
-        this.remoteTaskMinErrorDuration = remoteTaskMinErrorDuration;
+        return this;
+    }
+
+    @NotNull
+    @MinDuration("1s")
+    public Duration getRemoteTaskMaxErrorDuration()
+    {
+        return remoteTaskMaxErrorDuration;
+    }
+
+    @Config("query.remote-task.max-error-duration")
+    public QueryManagerConfig setRemoteTaskMaxErrorDuration(Duration remoteTaskMaxErrorDuration)
+    {
+        this.remoteTaskMaxErrorDuration = remoteTaskMaxErrorDuration;
         return this;
     }
 
@@ -196,6 +250,19 @@ public class QueryManagerConfig
     public QueryManagerConfig setQueryMaxRunTime(Duration queryMaxRunTime)
     {
         this.queryMaxRunTime = queryMaxRunTime;
+        return this;
+    }
+
+    @NotNull
+    public Duration getQueryMaxExecutionTime()
+    {
+        return queryMaxExecutionTime;
+    }
+
+    @Config("query.max-execution-time")
+    public QueryManagerConfig setQueryMaxExecutionTime(Duration queryMaxExecutionTime)
+    {
+        this.queryMaxExecutionTime = queryMaxExecutionTime;
         return this;
     }
 
@@ -236,6 +303,62 @@ public class QueryManagerConfig
     public QueryManagerConfig setQueryExecutionPolicy(String queryExecutionPolicy)
     {
         this.queryExecutionPolicy = queryExecutionPolicy;
+        return this;
+    }
+
+    @Min(1)
+    public int getInitializationRequiredWorkers()
+    {
+        return initializationRequiredWorkers;
+    }
+
+    @Config("query-manager.initialization-required-workers")
+    @ConfigDescription("Minimum number of workers that must be available before the cluster will accept queries")
+    public QueryManagerConfig setInitializationRequiredWorkers(int initializationRequiredWorkers)
+    {
+        this.initializationRequiredWorkers = initializationRequiredWorkers;
+        return this;
+    }
+
+    @NotNull
+    public Duration getInitializationTimeout()
+    {
+        return initializationTimeout;
+    }
+
+    @Config("query-manager.initialization-timeout")
+    @ConfigDescription("After this time, the cluster will accept queries even if the minimum required workers are not available")
+    public QueryManagerConfig setInitializationTimeout(Duration initializationTimeout)
+    {
+        this.initializationTimeout = initializationTimeout;
+        return this;
+    }
+
+    @Min(1)
+    public int getRequiredWorkers()
+    {
+        return requiredWorkers;
+    }
+
+    @Config("query-manager.required-workers")
+    @ConfigDescription("Minimum number of active workers that must be available before a query will start")
+    public QueryManagerConfig setRequiredWorkers(int requiredWorkers)
+    {
+        this.requiredWorkers = requiredWorkers;
+        return this;
+    }
+
+    @NotNull
+    public Duration getRequiredWorkersMaxWait()
+    {
+        return requiredWorkersMaxWait;
+    }
+
+    @Config("query-manager.required-workers-max-wait")
+    @ConfigDescription("Maximum time to wait for minimum number of workers before the query is failed")
+    public QueryManagerConfig setRequiredWorkersMaxWait(Duration requiredWorkersMaxWait)
+    {
+        this.requiredWorkersMaxWait = requiredWorkersMaxWait;
         return this;
     }
 }

@@ -28,6 +28,7 @@ import com.facebook.presto.raptor.storage.organization.ShardCompactionManager;
 import com.facebook.presto.raptor.storage.organization.ShardCompactor;
 import com.facebook.presto.raptor.storage.organization.ShardOrganizationManager;
 import com.facebook.presto.raptor.storage.organization.ShardOrganizer;
+import com.facebook.presto.raptor.storage.organization.TemporalFunction;
 import com.google.common.base.Ticker;
 import com.google.inject.Binder;
 import com.google.inject.Module;
@@ -52,6 +53,7 @@ public class StorageModule
     public void configure(Binder binder)
     {
         configBinder(binder).bindConfig(StorageManagerConfig.class);
+        configBinder(binder).bindConfig(BucketBalancerConfig.class);
         configBinder(binder).bindConfig(ShardCleanerConfig.class);
         configBinder(binder).bindConfig(MetadataConfig.class);
 
@@ -72,8 +74,10 @@ public class StorageModule
         binder.bind(ShardCompactor.class).in(Scopes.SINGLETON);
         binder.bind(ShardEjector.class).in(Scopes.SINGLETON);
         binder.bind(ShardCleaner.class).in(Scopes.SINGLETON);
+        binder.bind(BucketBalancer.class).in(Scopes.SINGLETON);
         binder.bind(ReaderAttributes.class).in(Scopes.SINGLETON);
         binder.bind(AssignmentLimiter.class).in(Scopes.SINGLETON);
+        binder.bind(TemporalFunction.class).in(Scopes.SINGLETON);
 
         newExporter(binder).export(ShardRecoveryManager.class).as(generatedNameOf(ShardRecoveryManager.class, connectorId));
         newExporter(binder).export(BackupManager.class).as(generatedNameOf(BackupManager.class, connectorId));
@@ -83,6 +87,7 @@ public class StorageModule
         newExporter(binder).export(ShardCompactor.class).as(generatedNameOf(ShardCompactor.class, connectorId));
         newExporter(binder).export(ShardEjector.class).as(generatedNameOf(ShardEjector.class, connectorId));
         newExporter(binder).export(ShardCleaner.class).as(generatedNameOf(ShardCleaner.class, connectorId));
+        newExporter(binder).export(BucketBalancer.class).as(generatedNameOf(BucketBalancer.class, connectorId));
         newExporter(binder).export(JobFactory.class).withGeneratedName();
     }
 }

@@ -32,15 +32,31 @@ String Functions
 
     Returns the Unicode code point ``n`` as a single character string.
 
+.. function:: codepoint(string) -> integer
+
+    Returns the Unicode code point of the only character of ``string``.
+
 .. function:: concat(string1, ..., stringN) -> varchar
 
     Returns the concatenation of ``string1``, ``string2``, ``...``, ``stringN``.
     This function provides the same functionality as the
     SQL-standard concatenation operator (``||``).
 
+.. function:: hamming_distance(string1, string2) -> bigint
+
+    Returns the Hamming distance of ``string1`` and ``string2``,
+    i.e. the number of positions at which the corresponding characters are different.
+    Note that the two strings must have the same length.
+
 .. function:: length(string) -> bigint
 
     Returns the length of ``string`` in characters.
+
+.. function:: levenshtein_distance(string1, string2) -> bigint
+
+    Returns the Levenshtein edit distance of ``string1`` and ``string2``,
+    i.e. the minimum number of single-character edits (insertions,
+    deletions or substitutions) needed to change ``string1`` into ``string2``.
 
 .. function:: lower(string) -> varchar
 
@@ -80,11 +96,11 @@ String Functions
 
     Removes trailing whitespace from ``string``.
 
-.. function:: split(string, delimiter) -> array<varchar>
+.. function:: split(string, delimiter) -> array(varchar)
 
     Splits ``string`` on ``delimiter`` and returns an array.
 
-.. function:: split(string, delimiter, limit) -> array<varchar>
+.. function:: split(string, delimiter, limit) -> array(varchar)
 
     Splits ``string`` on ``delimiter`` and returns an array of size at most
     ``limit``. The last element in the array always contain everything
@@ -101,6 +117,13 @@ String Functions
     Splits ``string`` by ``entryDelimiter`` and ``keyValueDelimiter`` and returns a map.
     ``entryDelimiter`` splits ``string`` into key-value pairs. ``keyValueDelimiter`` splits
     each pair into key and value.
+
+.. function:: split_to_multimap(string, entryDelimiter, keyValueDelimiter) -> map(varchar, array(varchar))
+
+    Splits ``string`` by ``entryDelimiter`` and ``keyValueDelimiter`` and returns a map
+    containing an array of values for each unique key. ``entryDelimiter`` splits ``string``
+    into key-value pairs. ``keyValueDelimiter`` splits each pair into key and value. The
+    values for each key will be in the same order as they appeared in ``string``.
 
 .. function:: strpos(string, substring) -> bigint
 
@@ -131,6 +154,14 @@ String Functions
 .. function:: upper(string) -> varchar
 
     Converts ``string`` to uppercase.
+
+.. function:: word_stem(word) -> varchar
+
+    Returns the stem of ``word`` in the English language.
+
+.. function:: word_stem(word, lang) -> varchar
+
+    Returns the stem of ``word`` in the ``lang`` language.
 
 Unicode Functions
 -----------------

@@ -16,7 +16,6 @@ package com.facebook.presto.verifier;
 import com.facebook.presto.spi.ErrorCode;
 import com.facebook.presto.spi.PrestoException;
 import com.google.common.base.Joiner;
-import com.google.common.base.Throwables;
 import com.google.common.collect.ImmutableSet;
 import io.airlift.event.client.EventClient;
 import io.airlift.log.Logger;
@@ -36,6 +35,7 @@ import java.util.regex.Pattern;
 import static com.facebook.presto.spi.StandardErrorCode.PAGE_TRANSPORT_TIMEOUT;
 import static com.facebook.presto.spi.StandardErrorCode.REMOTE_TASK_MISMATCH;
 import static com.facebook.presto.spi.StandardErrorCode.TOO_MANY_REQUESTS_FAILED;
+import static com.facebook.presto.verifier.QueryResult.State.SUCCESS;
 import static com.google.common.base.Throwables.getStackTraceAsString;
 import static java.lang.String.format;
 import static java.util.Objects.requireNonNull;
@@ -77,7 +77,7 @@ public class Verifier
         ExecutorService executor = newFixedThreadPool(threadCount);
         CompletionService<Validator> completionService = new ExecutorCompletionService<>(executor);
 
-        int totalQueries = queries.size() * config.getSuiteRepetitions();
+        int totalQueries = queries.size() * config.getSuiteRepetitions() * config.getQueryRepetitions();
         log.info("Total Queries:     %d", totalQueries);
 
         log.info("Whitelisted Queries: %s", Joiner.on(',').join(whitelist));
@@ -167,7 +167,8 @@ public class Verifier
                 try {
                     ((Closeable) eventClient).close();
                 }
-                catch (IOException ignored) { }
+                catch (IOException ignored) {
+                }
                 log.info("");
             }
         }
@@ -201,7 +202,7 @@ public class Verifier
             if (e != null && shouldAddStackTrace(e)) {
                 errorMessage += getStackTraceAsString(e);
             }
-            else {
+            if (control.getState() == SUCCESS && test.getState() == SUCCESS) {
                 errorMessage += validator.getResultsComparison(precision).trim();
             }
         }
@@ -214,12 +215,18 @@ public class Verifier
                 !validator.valid(),
                 queryPair.getTest().getCatalog(),
                 queryPair.getTest().getSchema(),
+                queryPair.getTest().getPreQueries(),
                 queryPair.getTest().getQuery(),
+                queryPair.getTest().getPostQueries(),
+                test.getQueryId(),
                 optionalDurationToSeconds(test.getCpuTime()),
                 optionalDurationToSeconds(test.getWallTime()),
                 queryPair.getControl().getCatalog(),
                 queryPair.getControl().getSchema(),
+                queryPair.getControl().getPreQueries(),
                 queryPair.getControl().getQuery(),
+                queryPair.getControl().getPostQueries(),
+                control.getQueryId(),
                 optionalDurationToSeconds(control.getCpuTime()),
                 optionalDurationToSeconds(control.getWallTime()),
                 errorMessage);
@@ -237,7 +244,7 @@ public class Verifier
             return completionService.take().get();
         }
         catch (ExecutionException e) {
-            throw Throwables.propagate(e);
+            throw new RuntimeException(e);
         }
     }
 

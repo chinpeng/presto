@@ -22,7 +22,6 @@ import java.io.IOException;
 
 import static com.facebook.presto.kafka.KafkaQueryRunner.createKafkaQueryRunner;
 import static com.facebook.presto.kafka.util.EmbeddedKafka.createEmbeddedKafka;
-import static io.airlift.testing.Closeables.closeAllRuntimeException;
 import static io.airlift.tpch.TpchTable.ORDERS;
 
 @Test
@@ -38,22 +37,15 @@ public class TestKafkaIntegrationSmokeTest
     }
 
     public TestKafkaIntegrationSmokeTest(EmbeddedKafka embeddedKafka)
-            throws Exception
     {
-        super(createKafkaQueryRunner(embeddedKafka, ORDERS));
+        super(() -> createKafkaQueryRunner(embeddedKafka, ORDERS));
         this.embeddedKafka = embeddedKafka;
-    }
-
-    @Override
-    public void testViewAccessControl()
-    {
-        // kafka does not support views
     }
 
     @AfterClass(alwaysRun = true)
     public void destroy()
             throws IOException
     {
-        closeAllRuntimeException(queryRunner, embeddedKafka);
+        embeddedKafka.close();
     }
 }

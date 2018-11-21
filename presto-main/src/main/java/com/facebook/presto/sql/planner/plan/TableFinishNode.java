@@ -17,10 +17,12 @@ import com.facebook.presto.sql.planner.Symbol;
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.Iterables;
 
 import javax.annotation.concurrent.Immutable;
 
 import java.util.List;
+import java.util.Optional;
 
 import static com.facebook.presto.sql.planner.plan.TableWriterNode.WriterTarget;
 import static com.google.common.base.Preconditions.checkArgument;
@@ -32,21 +34,28 @@ public class TableFinishNode
 {
     private final PlanNode source;
     private final WriterTarget target;
-    private final List<Symbol> outputs;
+    private final Symbol rowCountSymbol;
+    private final Optional<StatisticAggregations> statisticsAggregation;
+    private final Optional<StatisticAggregationsDescriptor<Symbol>> statisticsAggregationDescriptor;
 
     @JsonCreator
     public TableFinishNode(
             @JsonProperty("id") PlanNodeId id,
             @JsonProperty("source") PlanNode source,
             @JsonProperty("target") WriterTarget target,
-            @JsonProperty("outputs") List<Symbol> outputs)
+            @JsonProperty("rowCountSymbol") Symbol rowCountSymbol,
+            @JsonProperty("statisticsAggregation") Optional<StatisticAggregations> statisticsAggregation,
+            @JsonProperty("statisticsAggregationDescriptor") Optional<StatisticAggregationsDescriptor<Symbol>> statisticsAggregationDescriptor)
     {
         super(id);
 
         checkArgument(target != null || source instanceof TableWriterNode);
         this.source = requireNonNull(source, "source is null");
         this.target = requireNonNull(target, "target is null");
-        this.outputs = ImmutableList.copyOf(requireNonNull(outputs, "outputs is null"));
+        this.rowCountSymbol = requireNonNull(rowCountSymbol, "rowCountSymbol is null");
+        this.statisticsAggregation = requireNonNull(statisticsAggregation, "statisticsAggregation is null");
+        this.statisticsAggregationDescriptor = requireNonNull(statisticsAggregationDescriptor, "statisticsAggregationDescriptor is null");
+        checkArgument(statisticsAggregation.isPresent() == statisticsAggregationDescriptor.isPresent(), "statisticsAggregation and statisticsAggregationDescriptor must both be either present or absent");
     }
 
     @JsonProperty
@@ -61,11 +70,22 @@ public class TableFinishNode
         return target;
     }
 
-    @JsonProperty("outputs")
-    @Override
-    public List<Symbol> getOutputSymbols()
+    @JsonProperty
+    public Symbol getRowCountSymbol()
     {
-        return outputs;
+        return rowCountSymbol;
+    }
+
+    @JsonProperty
+    public Optional<StatisticAggregations> getStatisticsAggregation()
+    {
+        return statisticsAggregation;
+    }
+
+    @JsonProperty
+    public Optional<StatisticAggregationsDescriptor<Symbol>> getStatisticsAggregationDescriptor()
+    {
+        return statisticsAggregationDescriptor;
     }
 
     @Override
@@ -75,8 +95,26 @@ public class TableFinishNode
     }
 
     @Override
-    public <C, R> R accept(PlanVisitor<C, R> visitor, C context)
+    public List<Symbol> getOutputSymbols()
+    {
+        return ImmutableList.of(rowCountSymbol);
+    }
+
+    @Override
+    public <R, C> R accept(PlanVisitor<R, C> visitor, C context)
     {
         return visitor.visitTableFinish(this, context);
+    }
+
+    @Override
+    public PlanNode replaceChildren(List<PlanNode> newChildren)
+    {
+        return new TableFinishNode(
+                getId(),
+                Iterables.getOnlyElement(newChildren),
+                target,
+                rowCountSymbol,
+                statisticsAggregation,
+                statisticsAggregationDescriptor);
     }
 }

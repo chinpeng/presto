@@ -20,16 +20,20 @@ import com.google.common.annotations.VisibleForTesting;
 
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.CompletableFuture;
-import java.util.function.BiFunction;
+import java.util.OptionalInt;
 
-import static com.facebook.presto.util.ImmutableCollectors.toImmutableList;
+import static com.google.common.collect.ImmutableList.toImmutableList;
 import static java.util.Objects.requireNonNull;
 
 public class FixedCountScheduler
         implements StageScheduler
 {
-    private final BiFunction<Node, Integer, RemoteTask> taskScheduler;
+    public interface TaskScheduler
+    {
+        RemoteTask scheduleTask(Node node, int partition, OptionalInt totalPartitions);
+    }
+
+    private final TaskScheduler taskScheduler;
     private final Map<Integer, Node> partitionToNode;
 
     public FixedCountScheduler(SqlStageExecution stage, Map<Integer, Node> partitionToNode)
@@ -40,7 +44,7 @@ public class FixedCountScheduler
     }
 
     @VisibleForTesting
-    public FixedCountScheduler(BiFunction<Node, Integer, RemoteTask> taskScheduler, Map<Integer, Node> partitionToNode)
+    public FixedCountScheduler(TaskScheduler taskScheduler, Map<Integer, Node> partitionToNode)
     {
         this.taskScheduler = requireNonNull(taskScheduler, "taskScheduler is null");
         this.partitionToNode = requireNonNull(partitionToNode, "partitionToNode is null");
@@ -49,10 +53,11 @@ public class FixedCountScheduler
     @Override
     public ScheduleResult schedule()
     {
+        OptionalInt totalPartitions = OptionalInt.of(partitionToNode.size());
         List<RemoteTask> newTasks = partitionToNode.entrySet().stream()
-                .map(entry -> taskScheduler.apply(entry.getValue(), entry.getKey()))
+                .map(entry -> taskScheduler.scheduleTask(entry.getValue(), entry.getKey(), totalPartitions))
                 .collect(toImmutableList());
 
-        return new ScheduleResult(true, newTasks, CompletableFuture.completedFuture(null));
+        return new ScheduleResult(true, newTasks, 0);
     }
 }

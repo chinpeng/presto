@@ -14,19 +14,23 @@
 package com.facebook.presto.sql.planner.optimizations;
 
 import com.facebook.presto.Session;
+import com.facebook.presto.execution.warnings.WarningCollector;
 import com.facebook.presto.metadata.Metadata;
 import com.facebook.presto.metadata.Signature;
 import com.facebook.presto.spi.type.Type;
 import com.facebook.presto.sql.parser.SqlParser;
 import com.facebook.presto.sql.planner.Symbol;
 import com.facebook.presto.sql.planner.SymbolToInputRewriter;
+import com.facebook.presto.sql.planner.TypeProvider;
 import com.facebook.presto.sql.relational.CallExpression;
 import com.facebook.presto.sql.relational.ConstantExpression;
 import com.facebook.presto.sql.relational.InputReferenceExpression;
+import com.facebook.presto.sql.relational.LambdaDefinitionExpression;
 import com.facebook.presto.sql.relational.RowExpression;
 import com.facebook.presto.sql.relational.RowExpressionVisitor;
+import com.facebook.presto.sql.relational.VariableReferenceExpression;
 import com.facebook.presto.sql.tree.Expression;
-import com.facebook.presto.sql.tree.ExpressionTreeRewriter;
+import com.facebook.presto.sql.tree.NodeRef;
 import com.google.common.collect.ComparisonChain;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
@@ -36,7 +40,6 @@ import io.airlift.slice.Slice;
 
 import java.util.Comparator;
 import java.util.HashMap;
-import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
@@ -48,15 +51,17 @@ import static com.facebook.presto.metadata.Signature.internalScalarFunction;
 import static com.facebook.presto.spi.function.OperatorType.EQUAL;
 import static com.facebook.presto.spi.function.OperatorType.GREATER_THAN;
 import static com.facebook.presto.spi.function.OperatorType.GREATER_THAN_OR_EQUAL;
+import static com.facebook.presto.spi.function.OperatorType.IS_DISTINCT_FROM;
 import static com.facebook.presto.spi.function.OperatorType.LESS_THAN;
 import static com.facebook.presto.spi.function.OperatorType.LESS_THAN_OR_EQUAL;
 import static com.facebook.presto.spi.function.OperatorType.NOT_EQUAL;
 import static com.facebook.presto.spi.type.BooleanType.BOOLEAN;
 import static com.facebook.presto.sql.analyzer.ExpressionAnalyzer.getExpressionTypesFromInput;
 import static com.facebook.presto.sql.relational.SqlToRowExpressionTranslator.translate;
-import static com.facebook.presto.util.ImmutableCollectors.toImmutableList;
 import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.collect.ImmutableList.toImmutableList;
 import static java.lang.Integer.min;
+import static java.util.Collections.emptyList;
 import static java.util.Objects.requireNonNull;
 
 public class ExpressionEquivalence
@@ -72,12 +77,12 @@ public class ExpressionEquivalence
         this.sqlParser = requireNonNull(sqlParser, "sqlParser is null");
     }
 
-    public boolean areExpressionsEquivalent(Session session, Expression leftExpression, Expression rightExpression, Map<Symbol, Type> types)
+    public boolean areExpressionsEquivalent(Session session, Expression leftExpression, Expression rightExpression, TypeProvider types)
     {
         Map<Symbol, Integer> symbolInput = new HashMap<>();
         Map<Integer, Type> inputTypes = new HashMap<>();
         int inputId = 0;
-        for (Entry<Symbol, Type> entry : types.entrySet()) {
+        for (Entry<Symbol, Type> entry : types.allTypes().entrySet()) {
             symbolInput.put(entry.getKey(), inputId);
             inputTypes.put(inputId, entry.getValue());
             inputId++;
@@ -94,22 +99,24 @@ public class ExpressionEquivalence
     private RowExpression toRowExpression(Session session, Expression expression, Map<Symbol, Integer> symbolInput, Map<Integer, Type> inputTypes)
     {
         // replace qualified names with input references since row expressions do not support these
-        Expression expressionWithInputReferences = ExpressionTreeRewriter.rewriteWith(new SymbolToInputRewriter(symbolInput), expression);
+        Expression expressionWithInputReferences = new SymbolToInputRewriter(symbolInput).rewrite(expression);
 
         // determine the type of every expression
-        IdentityHashMap<Expression, Type> expressionTypes = getExpressionTypesFromInput(
+        Map<NodeRef<Expression>, Type> expressionTypes = getExpressionTypesFromInput(
                 session,
                 metadata,
                 sqlParser,
                 inputTypes,
-                expressionWithInputReferences);
+                expressionWithInputReferences,
+                emptyList(), /* parameters have already been replaced */
+                WarningCollector.NOOP);
 
         // convert to row expression
         return translate(expressionWithInputReferences, SCALAR, expressionTypes, metadata.getFunctionRegistry(), metadata.getTypeManager(), session, false);
     }
 
     private static class CanonicalizationVisitor
-            implements RowExpressionVisitor<Void, RowExpression>
+            implements RowExpressionVisitor<RowExpression, Void>
     {
         @Override
         public RowExpression visitCall(CallExpression call, Void context)
@@ -148,7 +155,7 @@ public class ExpressionEquivalence
                         sortedArguments);
             }
 
-            if (callName.equals(mangleOperatorName(EQUAL)) || callName.equals(mangleOperatorName(NOT_EQUAL)) || callName.equals("IS_DISTINCT_FROM")) {
+            if (callName.equals(mangleOperatorName(EQUAL)) || callName.equals(mangleOperatorName(NOT_EQUAL)) || callName.equals(mangleOperatorName(IS_DISTINCT_FROM))) {
                 // sort arguments
                 return new CallExpression(
                         call.getSignature(),
@@ -201,6 +208,18 @@ public class ExpressionEquivalence
         {
             return node;
         }
+
+        @Override
+        public RowExpression visitLambda(LambdaDefinitionExpression lambda, Void context)
+        {
+            return new LambdaDefinitionExpression(lambda.getArgumentTypes(), lambda.getArguments(), lambda.getBody().accept(this, context));
+        }
+
+        @Override
+        public RowExpression visitVariableReference(VariableReferenceExpression reference, Void context)
+        {
+            return reference;
+        }
     }
 
     private static class RowExpressionComparator
@@ -238,6 +257,18 @@ public class ExpressionEquivalence
                 Object leftValue = leftConstant.getValue();
                 Object rightValue = rightConstant.getValue();
 
+                if (leftValue == null) {
+                    if (rightValue == null) {
+                        return 0;
+                    }
+                    else {
+                        return -1;
+                    }
+                }
+                else if (rightValue == null) {
+                    return 1;
+                }
+
                 Class<?> javaType = leftConstant.getType().getJavaType();
                 if (javaType == boolean.class) {
                     return ((Boolean) leftValue).compareTo((Boolean) rightValue);
@@ -259,6 +290,33 @@ public class ExpressionEquivalence
 
             if (left instanceof InputReferenceExpression) {
                 return Integer.compare(((InputReferenceExpression) left).getField(), ((InputReferenceExpression) right).getField());
+            }
+
+            if (left instanceof LambdaDefinitionExpression) {
+                LambdaDefinitionExpression leftLambda = (LambdaDefinitionExpression) left;
+                LambdaDefinitionExpression rightLambda = (LambdaDefinitionExpression) right;
+
+                return ComparisonChain.start()
+                        .compare(
+                                leftLambda.getArgumentTypes(),
+                                rightLambda.getArgumentTypes(),
+                                new ListComparator<>(Comparator.comparing(Object::toString)))
+                        .compare(
+                                leftLambda.getArguments(),
+                                rightLambda.getArguments(),
+                                new ListComparator<>(Comparator.<String>naturalOrder()))
+                        .compare(leftLambda.getBody(), rightLambda.getBody(), this)
+                        .result();
+            }
+
+            if (left instanceof VariableReferenceExpression) {
+                VariableReferenceExpression leftVariableReference = (VariableReferenceExpression) left;
+                VariableReferenceExpression rightVariableReference = (VariableReferenceExpression) right;
+
+                return ComparisonChain.start()
+                        .compare(leftVariableReference.getName(), rightVariableReference.getName())
+                        .compare(leftVariableReference.getType(), rightVariableReference.getType(), Comparator.comparing(Object::toString))
+                        .result();
             }
 
             throw new IllegalArgumentException("Unsupported RowExpression type " + left.getClass().getSimpleName());

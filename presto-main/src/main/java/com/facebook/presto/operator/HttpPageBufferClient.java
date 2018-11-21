@@ -13,11 +13,10 @@
  */
 package com.facebook.presto.operator;
 
-import com.facebook.presto.spi.Page;
+import com.facebook.presto.execution.buffer.SerializedPage;
+import com.facebook.presto.server.remotetask.Backoff;
 import com.facebook.presto.spi.PrestoException;
-import com.facebook.presto.spi.block.BlockEncodingSerde;
-import com.google.common.base.Stopwatch;
-import com.google.common.base.Throwables;
+import com.google.common.base.Ticker;
 import com.google.common.collect.ImmutableList;
 import com.google.common.net.MediaType;
 import com.google.common.util.concurrent.FutureCallback;
@@ -49,44 +48,46 @@ import java.net.URI;
 import java.util.List;
 import java.util.OptionalInt;
 import java.util.OptionalLong;
+import java.util.concurrent.Executor;
 import java.util.concurrent.Future;
 import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
 import static com.facebook.presto.PrestoMediaTypes.PRESTO_PAGES_TYPE;
-import static com.facebook.presto.block.PagesSerde.readPages;
 import static com.facebook.presto.client.PrestoHeaders.PRESTO_BUFFER_COMPLETE;
 import static com.facebook.presto.client.PrestoHeaders.PRESTO_MAX_SIZE;
 import static com.facebook.presto.client.PrestoHeaders.PRESTO_PAGE_NEXT_TOKEN;
 import static com.facebook.presto.client.PrestoHeaders.PRESTO_PAGE_TOKEN;
 import static com.facebook.presto.client.PrestoHeaders.PRESTO_TASK_INSTANCE_ID;
+import static com.facebook.presto.execution.buffer.PagesSerdeUtil.readSerializedPages;
 import static com.facebook.presto.operator.HttpPageBufferClient.PagesResponse.createEmptyPagesResponse;
 import static com.facebook.presto.operator.HttpPageBufferClient.PagesResponse.createPagesResponse;
+import static com.facebook.presto.spi.HostAddress.fromUri;
 import static com.facebook.presto.spi.StandardErrorCode.REMOTE_BUFFER_CLOSE_FAILED;
 import static com.facebook.presto.spi.StandardErrorCode.REMOTE_TASK_MISMATCH;
 import static com.facebook.presto.util.Failures.REMOTE_TASK_MISMATCH_ERROR;
 import static com.facebook.presto.util.Failures.WORKER_NODE_ERROR;
 import static com.google.common.base.MoreObjects.toStringHelper;
+import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.base.Strings.isNullOrEmpty;
 import static com.google.common.net.HttpHeaders.CONTENT_TYPE;
+import static io.airlift.http.client.HttpStatus.familyForStatusCode;
 import static io.airlift.http.client.Request.Builder.prepareDelete;
 import static io.airlift.http.client.Request.Builder.prepareGet;
 import static io.airlift.http.client.ResponseHandlerUtils.propagate;
 import static io.airlift.http.client.StatusResponseHandler.StatusResponse;
 import static io.airlift.http.client.StatusResponseHandler.createStatusResponseHandler;
-import static java.lang.Math.min;
 import static java.lang.String.format;
+import static java.nio.charset.StandardCharsets.UTF_8;
 import static java.util.Objects.requireNonNull;
+import static java.util.concurrent.TimeUnit.NANOSECONDS;
+import static java.util.concurrent.TimeUnit.SECONDS;
 
 @ThreadSafe
 public final class HttpPageBufferClient
         implements Closeable
 {
-    private static final int INITIAL_DELAY_MILLIS = 1;
-    private static final int MAX_DELAY_MILLIS = 100;
-
     private static final Logger log = Logger.get(HttpPageBufferClient.class);
 
     /**
@@ -99,7 +100,7 @@ public final class HttpPageBufferClient
      */
     public interface ClientCallback
     {
-        boolean addPages(HttpPageBufferClient client, List<Page> pages);
+        boolean addPages(HttpPageBufferClient client, List<SerializedPage> pages);
 
         void requestComplete(HttpPageBufferClient client);
 
@@ -110,14 +111,11 @@ public final class HttpPageBufferClient
 
     private final HttpClient httpClient;
     private final DataSize maxResponseSize;
-    private final Duration minErrorDuration;
+    private final boolean acknowledgePages;
     private final URI location;
     private final ClientCallback clientCallback;
-    private final BlockEncodingSerde blockEncodingSerde;
-    private final ScheduledExecutorService executor;
-
-    @GuardedBy("this")
-    private final Stopwatch errorStopwatch;
+    private final ScheduledExecutorService scheduler;
+    private final Backoff backoff;
 
     @GuardedBy("this")
     private boolean closed;
@@ -132,8 +130,6 @@ public final class HttpPageBufferClient
     @GuardedBy("this")
     private boolean completed;
     @GuardedBy("this")
-    private long errorDelayMillis;
-    @GuardedBy("this")
     private String taskInstanceId;
 
     private final AtomicLong rowsReceived = new AtomicLong();
@@ -146,36 +142,42 @@ public final class HttpPageBufferClient
     private final AtomicInteger requestsCompleted = new AtomicInteger();
     private final AtomicInteger requestsFailed = new AtomicInteger();
 
+    private final Executor pageBufferClientCallbackExecutor;
+
     public HttpPageBufferClient(
             HttpClient httpClient,
             DataSize maxResponseSize,
-            Duration minErrorDuration,
+            Duration maxErrorDuration,
+            boolean acknowledgePages,
             URI location,
             ClientCallback clientCallback,
-            BlockEncodingSerde blockEncodingSerde,
-            ScheduledExecutorService executor)
+            ScheduledExecutorService scheduler,
+            Executor pageBufferClientCallbackExecutor)
     {
-        this(httpClient, maxResponseSize, minErrorDuration, location, clientCallback, blockEncodingSerde, executor, Stopwatch.createUnstarted());
+        this(httpClient, maxResponseSize, maxErrorDuration, acknowledgePages, location, clientCallback, scheduler, Ticker.systemTicker(), pageBufferClientCallbackExecutor);
     }
 
     public HttpPageBufferClient(
             HttpClient httpClient,
             DataSize maxResponseSize,
-            Duration minErrorDuration,
+            Duration maxErrorDuration,
+            boolean acknowledgePages,
             URI location,
             ClientCallback clientCallback,
-            BlockEncodingSerde blockEncodingSerde,
-            ScheduledExecutorService executor,
-            Stopwatch errorStopwatch)
+            ScheduledExecutorService scheduler,
+            Ticker ticker,
+            Executor pageBufferClientCallbackExecutor)
     {
         this.httpClient = requireNonNull(httpClient, "httpClient is null");
         this.maxResponseSize = requireNonNull(maxResponseSize, "maxResponseSize is null");
-        this.minErrorDuration = requireNonNull(minErrorDuration, "minErrorDuration is null");
+        this.acknowledgePages = acknowledgePages;
         this.location = requireNonNull(location, "location is null");
         this.clientCallback = requireNonNull(clientCallback, "clientCallback is null");
-        this.blockEncodingSerde = requireNonNull(blockEncodingSerde, "blockEncodingManager is null");
-        this.executor = requireNonNull(executor, "executor is null");
-        this.errorStopwatch = requireNonNull(errorStopwatch, "errorStopwatch is null").reset();
+        this.scheduler = requireNonNull(scheduler, "scheduler is null");
+        this.pageBufferClientCallbackExecutor = requireNonNull(pageBufferClientCallbackExecutor, "pageBufferClientCallbackExecutor is null");
+        requireNonNull(maxErrorDuration, "maxErrorDuration is null");
+        requireNonNull(ticker, "ticker is null");
+        this.backoff = new Backoff(maxErrorDuration, ticker);
     }
 
     public synchronized PageBufferClientStatus getStatus()
@@ -258,9 +260,10 @@ public final class HttpPageBufferClient
         scheduled = true;
 
         // start before scheduling to include error delay
-        errorStopwatch.start();
+        backoff.startRequest();
 
-        executor.schedule(() -> {
+        long delayNanos = backoff.getBackoffDelayNanos();
+        scheduler.schedule(() -> {
             try {
                 initiateRequest();
             }
@@ -268,7 +271,7 @@ public final class HttpPageBufferClient
                 // should not happen, but be safe and fail the operator
                 clientCallback.clientFailed(HttpPageBufferClient.this, t);
             }
-        }, errorDelayMillis, TimeUnit.MILLISECONDS);
+        }, delayNanos, NANOSECONDS);
 
         lastUpdate = DateTime.now();
         requestsScheduled.incrementAndGet();
@@ -298,7 +301,7 @@ public final class HttpPageBufferClient
                 prepareGet()
                         .setHeader(PRESTO_MAX_SIZE, maxResponseSize.toString())
                         .setUri(uri).build(),
-                new PageResponseHandler(blockEncodingSerde));
+                new PageResponseHandler());
 
         future = resultFuture;
         Futures.addCallback(resultFuture, new FutureCallback<PagesResponse>()
@@ -306,12 +309,13 @@ public final class HttpPageBufferClient
             @Override
             public void onSuccess(PagesResponse result)
             {
-                checkNotHoldsLock();
+                checkNotHoldsLock(this);
 
-                resetErrors();
+                backoff.success();
 
-                List<Page> pages;
+                List<SerializedPage> pages;
                 try {
+                    boolean shouldAcknowledge = false;
                     synchronized (HttpPageBufferClient.this) {
                         if (taskInstanceId == null) {
                             taskInstanceId = result.getTaskInstanceId();
@@ -319,16 +323,42 @@ public final class HttpPageBufferClient
 
                         if (!isNullOrEmpty(taskInstanceId) && !result.getTaskInstanceId().equals(taskInstanceId)) {
                             // TODO: update error message
-                            throw new PrestoException(REMOTE_TASK_MISMATCH, REMOTE_TASK_MISMATCH_ERROR);
+                            throw new PrestoException(REMOTE_TASK_MISMATCH, format("%s (%s)", REMOTE_TASK_MISMATCH_ERROR, fromUri(uri)));
                         }
 
                         if (result.getToken() == token) {
                             pages = result.getPages();
                             token = result.getNextToken();
+                            shouldAcknowledge = pages.size() > 0;
                         }
                         else {
                             pages = ImmutableList.of();
                         }
+                    }
+
+                    if (shouldAcknowledge && acknowledgePages) {
+                        // Acknowledge token without handling the response.
+                        // The next request will also make sure the token is acknowledged.
+                        // This is to fast release the pages on the buffer side.
+                        URI uri = HttpUriBuilder.uriBuilderFrom(location).appendPath(String.valueOf(result.getNextToken())).appendPath("acknowledge").build();
+                        httpClient.executeAsync(prepareGet().setUri(uri).build(), new ResponseHandler<Void, RuntimeException>()
+                        {
+                            @Override
+                            public Void handleException(Request request, Exception exception)
+                            {
+                                log.debug(exception, "Acknowledge request failed: %s", uri);
+                                return null;
+                            }
+
+                            @Override
+                            public Void handle(Request request, Response response)
+                            {
+                                if (familyForStatusCode(response.getStatusCode()) != HttpStatus.Family.SUCCESSFUL) {
+                                    log.debug("Unexpected acknowledge response code: %s", response.getStatusCode());
+                                }
+                                return null;
+                            }
+                        });
                     }
                 }
                 catch (PrestoException e) {
@@ -336,14 +366,18 @@ public final class HttpPageBufferClient
                     return;
                 }
 
-                // add pages
+                // add pages:
+                // addPages must be called regardless of whether pages is an empty list because
+                // clientCallback can keep stats of requests and responses. For example, it may
+                // keep track of how often a client returns empty response and adjust request
+                // frequency or buffer size.
                 if (clientCallback.addPages(HttpPageBufferClient.this, pages)) {
                     pagesReceived.addAndGet(pages.size());
-                    rowsReceived.addAndGet(pages.stream().mapToLong(Page::getPositionCount).sum());
+                    rowsReceived.addAndGet(pages.stream().mapToLong(SerializedPage::getPositionCount).sum());
                 }
                 else {
                     pagesRejected.addAndGet(pages.size());
-                    rowsRejected.addAndGet(pages.stream().mapToLong(Page::getPositionCount).sum());
+                    rowsRejected.addAndGet(pages.stream().mapToLong(SerializedPage::getPositionCount).sum());
                 }
 
                 synchronized (HttpPageBufferClient.this) {
@@ -353,7 +387,6 @@ public final class HttpPageBufferClient
                     }
                     if (future == resultFuture) {
                         future = null;
-                        errorDelayMillis = 0;
                     }
                     lastUpdate = DateTime.now();
                 }
@@ -365,18 +398,21 @@ public final class HttpPageBufferClient
             public void onFailure(Throwable t)
             {
                 log.debug("Request to %s failed %s", uri, t);
-                checkNotHoldsLock();
-
-                Duration errorDuration = elapsedErrorDuration();
+                checkNotHoldsLock(this);
 
                 t = rewriteException(t);
-                if (!(t instanceof PrestoException) && errorDuration.compareTo(minErrorDuration) > 0) {
-                    String message = format("%s (%s - requests failed for %s)", WORKER_NODE_ERROR, uri, errorDuration);
-                    t = new PageTransportTimeoutException(message, t);
+                if (!(t instanceof PrestoException) && backoff.failure()) {
+                    String message = format("%s (%s - %s failures, failure duration %s, total failed request time %s)",
+                            WORKER_NODE_ERROR,
+                            uri,
+                            backoff.getFailureCount(),
+                            backoff.getFailureDuration().convertTo(SECONDS),
+                            backoff.getFailureRequestTimeTotal().convertTo(SECONDS));
+                    t = new PageTransportTimeoutException(fromUri(uri), message, t);
                 }
                 handleFailure(t, resultFuture);
             }
-        }, executor);
+        }, pageBufferClientCallbackExecutor);
     }
 
     private synchronized void sendDelete()
@@ -388,12 +424,12 @@ public final class HttpPageBufferClient
             @Override
             public void onSuccess(@Nullable StatusResponse result)
             {
-                checkNotHoldsLock();
+                checkNotHoldsLock(this);
+                backoff.success();
                 synchronized (HttpPageBufferClient.this) {
                     closed = true;
                     if (future == resultFuture) {
                         future = null;
-                        errorDelayMillis = 0;
                     }
                     lastUpdate = DateTime.now();
                 }
@@ -404,30 +440,31 @@ public final class HttpPageBufferClient
             @Override
             public void onFailure(Throwable t)
             {
-                checkNotHoldsLock();
+                checkNotHoldsLock(this);
 
                 log.error("Request to delete %s failed %s", location, t);
-                Duration errorDuration = elapsedErrorDuration();
-                if (!(t instanceof PrestoException) && errorDuration.compareTo(minErrorDuration) > 0) {
-                    String message = format("Error closing remote buffer (%s - requests failed for %s)", location, errorDuration);
+                if (!(t instanceof PrestoException) && backoff.failure()) {
+                    String message = format("Error closing remote buffer (%s - %s failures, failure duration %s, total failed request time %s)",
+                            location,
+                            backoff.getFailureCount(),
+                            backoff.getFailureDuration().convertTo(SECONDS),
+                            backoff.getFailureRequestTimeTotal().convertTo(SECONDS));
                     t = new PrestoException(REMOTE_BUFFER_CLOSE_FAILED, message, t);
                 }
                 handleFailure(t, resultFuture);
             }
-        }, executor);
+        }, pageBufferClientCallbackExecutor);
     }
 
-    private void checkNotHoldsLock()
+    private static void checkNotHoldsLock(Object lock)
     {
-        if (Thread.holdsLock(HttpPageBufferClient.this)) {
-            log.error("Can not handle callback while holding a lock on this");
-        }
+        checkState(!Thread.holdsLock(lock), "Cannot execute this method while holding a lock");
     }
 
     private void handleFailure(Throwable t, HttpResponseFuture<?> expectedFuture)
     {
         // Can not delegate to other callback while holding a lock on this
-        checkNotHoldsLock();
+        checkNotHoldsLock(this);
 
         requestsFailed.incrementAndGet();
         requestsCompleted.incrementAndGet();
@@ -437,7 +474,6 @@ public final class HttpPageBufferClient
         }
 
         synchronized (HttpPageBufferClient.this) {
-            increaseErrorDelay();
             if (future == expectedFuture) {
                 future = null;
             }
@@ -500,40 +536,9 @@ public final class HttpPageBufferClient
         return t;
     }
 
-    private synchronized Duration elapsedErrorDuration()
-    {
-        if (errorStopwatch.isRunning()) {
-            errorStopwatch.stop();
-        }
-        long nanos = errorStopwatch.elapsed(TimeUnit.NANOSECONDS);
-        return new Duration(nanos, TimeUnit.NANOSECONDS).convertTo(TimeUnit.SECONDS);
-    }
-
-    private synchronized void increaseErrorDelay()
-    {
-        if (errorDelayMillis == 0) {
-            errorDelayMillis = INITIAL_DELAY_MILLIS;
-        }
-        else {
-            errorDelayMillis = min(errorDelayMillis * 2, MAX_DELAY_MILLIS);
-        }
-    }
-
-    private synchronized void resetErrors()
-    {
-        errorStopwatch.reset();
-    }
-
     public static class PageResponseHandler
             implements ResponseHandler<PagesResponse, RuntimeException>
     {
-        private final BlockEncodingSerde blockEncodingSerde;
-
-        public PageResponseHandler(BlockEncodingSerde blockEncodingSerde)
-        {
-            this.blockEncodingSerde = blockEncodingSerde;
-        }
-
         @Override
         public PagesResponse handleException(Request request, Exception exception)
         {
@@ -553,7 +558,7 @@ public final class HttpPageBufferClient
                 // otherwise we must have gotten an OK response, everything else is considered fatal
                 if (response.getStatusCode() != HttpStatus.OK.code()) {
                     StringBuilder body = new StringBuilder();
-                    try (BufferedReader reader = new BufferedReader(new InputStreamReader(response.getInputStream()))) {
+                    try (BufferedReader reader = new BufferedReader(new InputStreamReader(response.getInputStream(), UTF_8))) {
                         // Get up to 1000 lines for debugging
                         for (int i = 0; i < 1000; i++) {
                             String line = reader.readLine();
@@ -585,11 +590,11 @@ public final class HttpPageBufferClient
                 boolean complete = getComplete(response);
 
                 try (SliceInput input = new InputStreamSliceInput(response.getInputStream())) {
-                    List<Page> pages = ImmutableList.copyOf(readPages(blockEncodingSerde, input));
+                    List<SerializedPage> pages = ImmutableList.copyOf(readSerializedPages(input));
                     return createPagesResponse(taskInstanceId, token, nextToken, pages, complete);
                 }
                 catch (IOException e) {
-                    throw Throwables.propagate(e);
+                    throw new RuntimeException(e);
                 }
             }
             catch (PageTransportErrorException e) {
@@ -646,23 +651,23 @@ public final class HttpPageBufferClient
 
     public static class PagesResponse
     {
-        public static PagesResponse createPagesResponse(String taskInstanceId, long token, long nextToken, Iterable<Page> pages, boolean complete)
+        public static PagesResponse createPagesResponse(String taskInstanceId, long token, long nextToken, Iterable<SerializedPage> pages, boolean complete)
         {
             return new PagesResponse(taskInstanceId, token, nextToken, pages, complete);
         }
 
         public static PagesResponse createEmptyPagesResponse(String taskInstanceId, long token, long nextToken, boolean complete)
         {
-            return new PagesResponse(taskInstanceId, token, nextToken, ImmutableList.<Page>of(), complete);
+            return new PagesResponse(taskInstanceId, token, nextToken, ImmutableList.of(), complete);
         }
 
         private final String taskInstanceId;
         private final long token;
         private final long nextToken;
-        private final List<Page> pages;
+        private final List<SerializedPage> pages;
         private final boolean clientComplete;
 
-        private PagesResponse(String taskInstanceId, long token, long nextToken, Iterable<Page> pages, boolean clientComplete)
+        private PagesResponse(String taskInstanceId, long token, long nextToken, Iterable<SerializedPage> pages, boolean clientComplete)
         {
             this.taskInstanceId = taskInstanceId;
             this.token = token;
@@ -681,7 +686,7 @@ public final class HttpPageBufferClient
             return nextToken;
         }
 
-        public List<Page> getPages()
+        public List<SerializedPage> getPages()
         {
             return pages;
         }

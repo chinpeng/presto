@@ -16,7 +16,7 @@ package com.facebook.presto.spi.block;
 import io.airlift.slice.Slice;
 import org.openjdk.jol.info.ClassLayout;
 
-import java.util.List;
+import java.util.function.BiConsumer;
 
 import static java.util.Objects.requireNonNull;
 
@@ -43,10 +43,10 @@ public class LazyBlock
     }
 
     @Override
-    public int getLength(int position)
+    public int getSliceLength(int position)
     {
         assureLoaded();
-        return block.getLength(position);
+        return block.getSliceLength(position);
     }
 
     @Override
@@ -164,31 +164,60 @@ public class LazyBlock
     }
 
     @Override
-    public int getSizeInBytes()
+    public long getSizeInBytes()
     {
         assureLoaded();
         return block.getSizeInBytes();
     }
 
     @Override
-    public int getRetainedSizeInBytes()
+    public long getRegionSizeInBytes(int position, int length)
+    {
+        assureLoaded();
+        return block.getRegionSizeInBytes(position, length);
+    }
+
+    @Override
+    public long getRetainedSizeInBytes()
     {
         assureLoaded();
         return INSTANCE_SIZE + block.getRetainedSizeInBytes();
     }
 
     @Override
-    public BlockEncoding getEncoding()
+    public long getEstimatedDataSizeForStats(int position)
     {
         assureLoaded();
-        return new LazyBlockEncoding(block.getEncoding());
+        return block.getEstimatedDataSizeForStats(position);
     }
 
     @Override
-    public Block copyPositions(List<Integer> positions)
+    public void retainedBytesForEachPart(BiConsumer<Object, Long> consumer)
     {
         assureLoaded();
-        return block.copyPositions(positions);
+        block.retainedBytesForEachPart(consumer);
+        consumer.accept(this, (long) INSTANCE_SIZE);
+    }
+
+    @Override
+    public String getEncodingName()
+    {
+        assureLoaded();
+        return LazyBlockEncoding.NAME;
+    }
+
+    @Override
+    public Block getPositions(int[] positions, int offset, int length)
+    {
+        assureLoaded();
+        return block.getPositions(positions, offset, length);
+    }
+
+    @Override
+    public Block copyPositions(int[] positions, int offset, int length)
+    {
+        assureLoaded();
+        return block.copyPositions(positions, offset, length);
     }
 
     @Override
@@ -212,12 +241,6 @@ public class LazyBlock
         return block.isNull(position);
     }
 
-    public Block getBlock()
-    {
-        assureLoaded();
-        return block;
-    }
-
     public void setBlock(Block block)
     {
         if (this.block != null) {
@@ -226,8 +249,19 @@ public class LazyBlock
         this.block = requireNonNull(block, "block is null");
     }
 
+    public boolean isLoaded()
+    {
+        return block != null;
+    }
+
     @Override
-    public void assureLoaded()
+    public Block getLoadedBlock()
+    {
+        assureLoaded();
+        return block;
+    }
+
+    private void assureLoaded()
     {
         if (block != null) {
             return;
